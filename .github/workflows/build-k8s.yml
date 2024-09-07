@@ -1,0 +1,64 @@
+name: Build and Release Kubernetes
+
+on:
+  push: 
+    branches:
+      - main # 在 main 分支有任何提交时触发
+  workflow_dispatch: # 手动触发工作流
+
+jobs:
+  build-kubernetes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23' # 指定适当的 Go 版本
+
+      - name: Install Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y make build-essential rsync
+
+      - name: Clone Kubernetes repository
+        run: |
+          git clone https://github.com/offsoc/kubernetes.git
+          cd kubernetes
+
+      - name: Build Kubernetes
+        run: |
+          cd kubernetes
+          make quick-release # 使用 Docker 进行快速构建
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: kubernetes-release
+          path: kubernetes/_output/ # 上传构建输出目录
+
+  create-release:
+    needs: build-kubernetes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Get commit SHA
+        id: get_commit_sha
+        run: echo "commit_sha=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "release-${{ env.commit_sha }}" # 使用每次提交的 SHA 创建唯一的版本标签
+          name: "Kubernetes Release ${{ env.commit_sha }}"
+          files: |
+            kubernetes/_output/release-tars/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
