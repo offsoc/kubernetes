@@ -25,6 +25,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/apiserver/pkg/authentication/user"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	zpagesfeatures "k8s.io/component-base/zpages/features"
 
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
 	"k8s.io/kubernetes/pkg/features"
@@ -194,6 +195,22 @@ func NodeRules() []rbacv1.PolicyRule {
 
 // ClusterRoles returns the cluster roles to bootstrap an API server with
 func ClusterRoles() []rbacv1.ClusterRole {
+	monitoringRules := []rbacv1.PolicyRule{
+		rbacv1helpers.NewRule("get").URLs(
+			"/metrics", "/metrics/slis",
+			"/livez", "/readyz", "/healthz",
+			"/livez/*", "/readyz/*", "/healthz/*",
+		).RuleOrDie(),
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentFlagz) {
+		monitoringRules = append(monitoringRules, rbacv1helpers.NewRule("get").URLs("/flagz").RuleOrDie())
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentStatusz) {
+		monitoringRules = append(monitoringRules, rbacv1helpers.NewRule("get").URLs("/statusz").RuleOrDie())
+	}
+
 	roles := []rbacv1.ClusterRole{
 		{
 			// a "root" role which can do absolutely anything
@@ -223,13 +240,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
 			// The splatted health check endpoints allow read access to individual health check
 			// endpoints which may contain more sensitive cluster information information
 			ObjectMeta: metav1.ObjectMeta{Name: "system:monitoring"},
-			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("get").URLs(
-					"/metrics", "/metrics/slis",
-					"/livez", "/readyz", "/healthz",
-					"/livez/*", "/readyz/*", "/healthz/*",
-				).RuleOrDie(),
-			},
+			Rules:      monitoringRules,
 		},
 	}
 
@@ -580,6 +591,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
 		rbacv1helpers.NewRule("create").Groups(authorizationGroup).Resources("subjectaccessreviews").RuleOrDie(),
 		// Needed for volume limits
 		rbacv1helpers.NewRule(Read...).Groups(storageGroup).Resources("csinodes").RuleOrDie(),
+		rbacv1helpers.NewRule("get", "list", "watch").Groups(storageGroup).Resources("volumeattachments").RuleOrDie(),
 		// Needed for namespaceSelector feature in pod affinity
 		rbacv1helpers.NewRule(Read...).Groups(legacyGroup).Resources("namespaces").RuleOrDie(),
 		rbacv1helpers.NewRule(Read...).Groups(storageGroup).Resources("csidrivers").RuleOrDie(),

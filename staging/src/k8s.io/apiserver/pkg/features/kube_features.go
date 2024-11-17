@@ -54,6 +54,15 @@ const (
 	// Allows us to enable anonymous auth for only certain apiserver endpoints.
 	AnonymousAuthConfigurableEndpoints featuregate.Feature = "AnonymousAuthConfigurableEndpoints"
 
+	// owner: @stlaz @tkashem @dgrisonnet
+	// kep: https://kep.k8s.io/3926
+	//
+	// Enables the cluster admin to identify resources that fail to
+	// decrypt or fail to be decoded into an object, and introduces
+	// a new delete option to allow deletion of such corrupt
+	// resources using the Kubernetes API only.
+	AllowUnsafeMalformedObjectDeletion featuregate.Feature = "AllowUnsafeMalformedObjectDeletion"
+
 	// owner: @smarterclayton
 	// stable: 1.29
 	//
@@ -87,6 +96,18 @@ const (
 	// Allows authorization to use field and label selectors.
 	AuthorizeWithSelectors featuregate.Feature = "AuthorizeWithSelectors"
 
+	// owner: @benluddy
+	// kep: https://kep.k8s.io/4222
+	//
+	// Enables CBOR as a supported encoding for requests and responses, and as the
+	// preferred storage encoding for custom resources.
+	CBORServingAndStorage featuregate.Feature = "CBORServingAndStorage"
+
+	// owner: @serathius
+	//
+	// Replaces watch cache hashmap implementation with a btree based one, bringing performance improvements.
+	BtreeWatchCache featuregate.Feature = "BtreeWatchCache"
+
 	// owner: @serathius
 	// Enables concurrent watch object decoding to avoid starving watch cache when conversion webhook is installed.
 	ConcurrentWatchObjectDecode featuregate.Feature = "ConcurrentWatchObjectDecode"
@@ -108,7 +129,7 @@ const (
 	// Enables KMS v1 API for encryption at rest.
 	KMSv1 featuregate.Feature = "KMSv1"
 
-	// owner: @alexzielenski, @cici37, @jiahuif
+	// owner: @alexzielenski, @cici37, @jiahuif, @jpbetz
 	// kep: https://kep.k8s.io/3962
 	//
 	// Enables the MutatingAdmissionPolicy in Admission Chain
@@ -226,13 +247,6 @@ const (
 	//
 	// Allow the API server to serve consistent lists from cache
 	ConsistentListFromCache featuregate.Feature = "ConsistentListFromCache"
-
-	// owner: @tkashem
-	//
-	// Allow Priority & Fairness in the API server to use a zero value for
-	// the 'nominalConcurrencyShares' field of the 'limited' section of a
-	// priority level.
-	ZeroLimitedNominalConcurrencyShares featuregate.Feature = "ZeroLimitedNominalConcurrencyShares"
 )
 
 func init() {
@@ -257,6 +271,10 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.26"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.27"), Default: true, PreRelease: featuregate.Beta},
 		{Version: version.MustParse("1.30"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+	},
+
+	AllowUnsafeMalformedObjectDeletion: {
+		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
 	AnonymousAuthConfigurableEndpoints: {
@@ -289,9 +307,17 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.30"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
+	BtreeWatchCache: {
+		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.Beta},
+	},
+
 	AuthorizeWithSelectors: {
 		{Version: version.MustParse("1.31"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.Beta},
+	},
+
+	CBORServingAndStorage: {
+		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
 	ConcurrentWatchObjectDecode: {
@@ -319,7 +345,7 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 	},
 
 	MutatingAdmissionPolicy: {
-		{Version: version.MustParse("1.30"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
 	OpenAPIEnums: {
@@ -399,11 +425,6 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 	WatchList: {
 		{Version: version.MustParse("1.27"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.Beta},
-	},
-
-	ZeroLimitedNominalConcurrencyShares: {
-		{Version: version.MustParse("1.29"), Default: false, PreRelease: featuregate.Beta},
-		{Version: version.MustParse("1.30"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 	},
 }
 

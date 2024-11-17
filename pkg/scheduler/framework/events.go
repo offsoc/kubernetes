@@ -20,8 +20,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/component-helpers/resource"
 	"k8s.io/dynamic-resource-allocation/resourceclaim"
-	"k8s.io/kubernetes/pkg/api/v1/resource"
 	"k8s.io/kubernetes/pkg/features"
 )
 
@@ -34,6 +34,9 @@ const (
 	// ForceActivate is the event when a pod is moved from unschedulablePods/backoffQ
 	// to activeQ. Usually it's triggered by plugin implementations.
 	ForceActivate = "ForceActivate"
+	// UnschedulableTimeout is the event when a pod is moved from unschedulablePods
+	// due to the timeout specified at pod-max-in-unschedulable-pods-duration.
+	UnschedulableTimeout = "UnschedulableTimeout"
 )
 
 var (
@@ -50,7 +53,9 @@ var (
 	// EventUnscheduledPodDelete is the event when an unscheduled pod is deleted.
 	EventUnscheduledPodDelete = ClusterEvent{Resource: unschedulablePod, ActionType: Delete}
 	// EventUnschedulableTimeout is the event when a pod stays in unschedulable for longer than timeout.
-	EventUnschedulableTimeout = ClusterEvent{Resource: WildCard, ActionType: All, label: "UnschedulableTimeout"}
+	EventUnschedulableTimeout = ClusterEvent{Resource: WildCard, ActionType: All, label: UnschedulableTimeout}
+	// EventForceActivate is the event when a pod is moved from unschedulablePods/backoffQ to activeQ.
+	EventForceActivate = ClusterEvent{Resource: WildCard, ActionType: All, label: ForceActivate}
 )
 
 // PodSchedulingPropertiesChange interprets the update of a pod and returns corresponding UpdatePodXYZ event(s).
@@ -91,7 +96,7 @@ type podChangeExtractor func(newPod *v1.Pod, oldPod *v1.Pod) ActionType
 // extractPodScaleDown interprets the update of a pod and returns PodRequestScaledDown event if any pod's resource request(s) is scaled down.
 func extractPodScaleDown(newPod, oldPod *v1.Pod) ActionType {
 	opt := resource.PodResourcesOptions{
-		InPlacePodVerticalScalingEnabled: utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling),
+		UseStatusResources: utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling),
 	}
 	newPodRequests := resource.PodRequests(newPod, opt)
 	oldPodRequests := resource.PodRequests(oldPod, opt)
