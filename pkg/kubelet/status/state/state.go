@@ -47,10 +47,9 @@ type Reader interface {
 
 type writer interface {
 	SetContainerResourceAllocation(podUID string, containerName string, alloc v1.ResourceRequirements) error
-	SetPodResourceAllocation(PodResourceAllocation) error
+	SetPodResourceAllocation(podUID string, alloc map[string]v1.ResourceRequirements) error
 	SetPodResizeStatus(podUID string, resizeStatus v1.PodResizeStatus)
 	Delete(podUID string, containerName string) error
-	ClearState() error
 }
 
 // State interface provides methods for tracking and setting pod resource allocation

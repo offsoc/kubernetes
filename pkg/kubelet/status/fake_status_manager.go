@@ -19,7 +19,10 @@ package status
 import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/status/state"
 )
@@ -81,7 +84,19 @@ func (m *fakeManager) SetPodAllocation(pod *v1.Pod) error {
 	klog.InfoS("SetPodAllocation()")
 	for _, container := range pod.Spec.Containers {
 		alloc := *container.Resources.DeepCopy()
-		m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc)
+		if err := m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc); err != nil {
+			return err
+		}
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.SidecarContainers) {
+		for _, container := range pod.Spec.InitContainers {
+			if podutil.IsRestartableInitContainer(&container) {
+				alloc := *container.Resources.DeepCopy()
+				if err := m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -93,6 +108,6 @@ func (m *fakeManager) SetPodResizeStatus(podUID types.UID, resizeStatus v1.PodRe
 // NewFakeManager creates empty/fake memory manager
 func NewFakeManager() Manager {
 	return &fakeManager{
-		state: state.NewStateMemory(),
+		state: state.NewStateMemory(state.PodResourceAllocation{}),
 	}
 }

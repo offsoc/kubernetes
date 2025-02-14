@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp" //nolint:depguard
 	clientset "k8s.io/client-go/kubernetes"
 
 	v1 "k8s.io/api/core/v1"
@@ -269,17 +269,31 @@ func updatePodFromAllocation(pod *v1.Pod, allocs state.PodResourceAllocation) (*
 	}
 
 	updated := false
-	for i, c := range pod.Spec.Containers {
+	containerAlloc := func(c v1.Container) (v1.ResourceRequirements, bool) {
 		if cAlloc, ok := allocated[c.Name]; ok {
 			if !apiequality.Semantic.DeepEqual(c.Resources, cAlloc) {
-				// Allocation differs from pod spec, update
+				// Allocation differs from pod spec, retrieve the allocation
 				if !updated {
-					// If this is the first update, copy the pod
+					// If this is the first update to be performed, copy the pod
 					pod = pod.DeepCopy()
 					updated = true
 				}
-				pod.Spec.Containers[i].Resources = cAlloc
+				return cAlloc, true
 			}
+		}
+		return v1.ResourceRequirements{}, false
+	}
+
+	for i, c := range pod.Spec.Containers {
+		if cAlloc, found := containerAlloc(c); found {
+			// Allocation differs from pod spec, update
+			pod.Spec.Containers[i].Resources = cAlloc
+		}
+	}
+	for i, c := range pod.Spec.InitContainers {
+		if cAlloc, found := containerAlloc(c); found {
+			// Allocation differs from pod spec, update
+			pod.Spec.InitContainers[i].Resources = cAlloc
 		}
 	}
 	return pod, updated
@@ -296,13 +310,23 @@ func (m *manager) GetPodResizeStatus(podUID types.UID) v1.PodResizeStatus {
 func (m *manager) SetPodAllocation(pod *v1.Pod) error {
 	m.podStatusesLock.RLock()
 	defer m.podStatusesLock.RUnlock()
+
+	podAlloc := make(map[string]v1.ResourceRequirements)
 	for _, container := range pod.Spec.Containers {
 		alloc := *container.Resources.DeepCopy()
-		if err := m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc); err != nil {
-			return err
+		podAlloc[container.Name] = alloc
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.SidecarContainers) {
+		for _, container := range pod.Spec.InitContainers {
+			if podutil.IsRestartableInitContainer(&container) {
+				alloc := *container.Resources.DeepCopy()
+				podAlloc[container.Name] = alloc
+			}
 		}
 	}
-	return nil
+
+	return m.state.SetPodResourceAllocation(string(pod.UID), podAlloc)
 }
 
 // SetPodResizeStatus checkpoints the last resizing decision for the pod.

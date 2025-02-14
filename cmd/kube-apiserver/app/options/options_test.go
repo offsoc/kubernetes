@@ -35,27 +35,26 @@ import (
 	auditbuffered "k8s.io/apiserver/plugin/pkg/audit/buffered"
 	audittruncate "k8s.io/apiserver/plugin/pkg/audit/truncate"
 	cliflag "k8s.io/component-base/cli/flag"
+	basecompatibility "k8s.io/component-base/compatibility"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/component-base/logs"
 	"k8s.io/component-base/metrics"
-	utilversion "k8s.io/component-base/version"
 	kapi "k8s.io/kubernetes/pkg/apis/core"
 	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/controlplane/reconcilers"
 	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
+	"k8s.io/kubernetes/pkg/serviceaccount"
 	netutils "k8s.io/utils/net"
 )
 
 func TestAddFlags(t *testing.T) {
-	componentGlobalsRegistry := featuregate.DefaultComponentGlobalsRegistry
-	t.Cleanup(func() {
-		componentGlobalsRegistry.Reset()
-	})
+	componentGlobalsRegistry := basecompatibility.NewComponentGlobalsRegistry()
 	fs := pflag.NewFlagSet("addflagstest", pflag.PanicOnError)
 
-	utilruntime.Must(componentGlobalsRegistry.Register("test", utilversion.NewEffectiveVersion("1.32"), featuregate.NewFeatureGate()))
+	utilruntime.Must(componentGlobalsRegistry.Register("test", basecompatibility.NewEffectiveVersionFromString("1.32", "1.31", "1.31"), featuregate.NewFeatureGate()))
 	s := NewServerRunOptions()
+	s.GenericServerRunOptions.ComponentGlobalsRegistry = componentGlobalsRegistry
 	for _, f := range s.Flags().FlagSets {
 		fs.AddFlagSet(f)
 	}
@@ -149,7 +148,7 @@ func TestAddFlags(t *testing.T) {
 				JSONPatchMaxCopyBytes:        int64(3 * 1024 * 1024),
 				MaxRequestBodyBytes:          int64(3 * 1024 * 1024),
 				ComponentGlobalsRegistry:     componentGlobalsRegistry,
-				ComponentName:                featuregate.DefaultKubeComponent,
+				ComponentName:                basecompatibility.DefaultKubeComponent,
 			},
 			Admission: &kubeoptions.AdmissionOptions{
 				GenericAdmission: &apiserveroptions.AdmissionOptions{
@@ -272,8 +271,9 @@ func TestAddFlags(t *testing.T) {
 				OIDC:           s.Authentication.OIDC,
 				RequestHeader:  &apiserveroptions.RequestHeaderAuthenticationOptions{},
 				ServiceAccounts: &kubeoptions.ServiceAccountAuthenticationOptions{
-					Lookup:           true,
-					ExtendExpiration: true,
+					Lookup:                true,
+					ExtendExpiration:      true,
+					MaxExtendedExpiration: serviceaccount.ExpirationExtensionSeconds * time.Second,
 				},
 				TokenFile:            &kubeoptions.TokenFileAuthenticationOptions{},
 				TokenSuccessCacheTTL: 10 * time.Second,
@@ -348,7 +348,7 @@ func TestAddFlags(t *testing.T) {
 	s.Authorization.AreLegacyFlagsSet = nil
 
 	if !reflect.DeepEqual(expected, s) {
-		t.Errorf("Got different run options than expected.\nDifference detected on:\n%s", cmp.Diff(expected, s, cmpopts.IgnoreUnexported(admission.Plugins{}, kubeoptions.OIDCAuthenticationOptions{}, kubeoptions.AnonymousAuthenticationOptions{})))
+		t.Errorf("Got different run options than expected.\nDifference detected on:\n%s", cmp.Diff(expected, s, cmpopts.IgnoreFields(apiserveroptions.ServerRunOptions{}, "ComponentGlobalsRegistry"), cmpopts.IgnoreUnexported(admission.Plugins{}, kubeoptions.OIDCAuthenticationOptions{}, kubeoptions.AnonymousAuthenticationOptions{})))
 	}
 	testEffectiveVersion := s.GenericServerRunOptions.ComponentGlobalsRegistry.EffectiveVersionFor("test")
 	if testEffectiveVersion.EmulationVersion().String() != "1.31" {
