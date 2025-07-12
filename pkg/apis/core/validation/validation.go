@@ -4399,10 +4399,13 @@ func validatePodResourceConsistency(spec *core.PodSpec, fldPath *field.Path) fie
 
 	// Pod-level requests must be >= aggregate requests of all containers in a pod.
 	for resourceName, ctrReqs := range aggrContainerReqs {
-		key := resourceName.String()
-		podSpecRequests := spec.Resources.Requests[core.ResourceName(key)]
+		// Skip if the pod-level request of the resource is not set.
+		podSpecRequests, exists := spec.Resources.Requests[core.ResourceName(resourceName.String())]
+		if !exists {
+			continue
+		}
 
-		fldPath := reqPath.Key(key)
+		fldPath := reqPath.Key(resourceName.String())
 		if ctrReqs.Cmp(podSpecRequests) > 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath, podSpecRequests.String(), fmt.Sprintf("must be greater than or equal to aggregate container requests of %s", ctrReqs.String())))
 		}
@@ -4411,6 +4414,7 @@ func validatePodResourceConsistency(spec *core.PodSpec, fldPath *field.Path) fie
 	// Individual Container limits must be <= Pod-level limits.
 	for i, ctr := range spec.Containers {
 		for resourceName, ctrLimit := range ctr.Resources.Limits {
+			// Skip if the pod-level limit of the resource is not set.
 			podSpecLimits, exists := spec.Resources.Limits[core.ResourceName(resourceName.String())]
 			if !exists {
 				continue
@@ -5924,9 +5928,12 @@ var supportedServiceIPFamilyPolicy = sets.New(
 	core.IPFamilyPolicyRequireDualStack)
 
 // ValidateService tests if required fields/annotations of a Service are valid.
-func ValidateService(service, oldService *core.Service) field.ErrorList {
+func validateService(service, oldService *core.Service) field.ErrorList {
 	metaPath := field.NewPath("metadata")
-	allErrs := ValidateObjectMeta(&service.ObjectMeta, true, ValidateServiceName, metaPath)
+
+	// Don't validate ObjectMeta here - that is handled in the ValidateServiceCreate/ValidateServiceUpdate
+	// functions which call ValidateObjectMeta and ValidateObjectMetaUpdate respectively.
+	var allErrs field.ErrorList
 
 	topologyHintsVal, topologyHintsSet := service.Annotations[core.DeprecatedAnnotationTopologyAwareHints]
 	topologyModeVal, topologyModeSet := service.Annotations[core.AnnotationTopologyMode]
@@ -6276,7 +6283,17 @@ func validateServiceTrafficDistribution(service *core.Service) field.ErrorList {
 
 // ValidateServiceCreate validates Services as they are created.
 func ValidateServiceCreate(service *core.Service) field.ErrorList {
-	return ValidateService(service, nil)
+	metaPath := field.NewPath("metadata")
+
+	// KEP-5311 Relaxed validation for Services names
+	validateServiceNameFunc := ValidateServiceName
+	if utilfeature.DefaultFeatureGate.Enabled(features.RelaxedServiceNameValidation) {
+		validateServiceNameFunc = apimachineryvalidation.NameIsDNSLabel
+	}
+
+	allErrs := ValidateObjectMeta(&service.ObjectMeta, true, validateServiceNameFunc, metaPath)
+
+	return append(allErrs, validateService(service, nil)...)
 }
 
 // ValidateServiceUpdate tests if required fields in the service are set during an update
@@ -6299,7 +6316,7 @@ func ValidateServiceUpdate(service, oldService *core.Service) field.ErrorList {
 
 	allErrs = append(allErrs, validateServiceExternalTrafficFieldsUpdate(oldService, service)...)
 
-	return append(allErrs, ValidateService(service, oldService)...)
+	return append(allErrs, validateService(service, oldService)...)
 }
 
 // ValidateServiceStatusUpdate tests if required fields in the Service are set when updating status.
@@ -6682,10 +6699,10 @@ func validateConfigMapNodeConfigSourceStatus(source *core.ConfigMapNodeConfigSou
 	allErrs := field.ErrorList{}
 	// uid and resourceVersion must be set in status
 	if string(source.UID) == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("uid"), "uid must be set in status"))
+		allErrs = append(allErrs, field.Required(fldPath.Child("uid"), ""))
 	}
 	if source.ResourceVersion == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("resourceVersion"), "resourceVersion must be set in status"))
+		allErrs = append(allErrs, field.Required(fldPath.Child("resourceVersion"), ""))
 	}
 	return append(allErrs, validateConfigMapNodeConfigSource(source, fldPath)...)
 }
@@ -6695,7 +6712,7 @@ func validateConfigMapNodeConfigSource(source *core.ConfigMapNodeConfigSource, f
 	allErrs := field.ErrorList{}
 	// validate target configmap namespace
 	if source.Namespace == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), "namespace must be set"))
+		allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), ""))
 	} else {
 		for _, msg := range ValidateNameFunc(ValidateNamespaceName)(source.Namespace, false) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("namespace"), source.Namespace, msg))
@@ -6703,7 +6720,7 @@ func validateConfigMapNodeConfigSource(source *core.ConfigMapNodeConfigSource, f
 	}
 	// validate target configmap name
 	if source.Name == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("name"), "name must be set"))
+		allErrs = append(allErrs, field.Required(fldPath.Child("name"), ""))
 	} else {
 		for _, msg := range ValidateNameFunc(ValidateConfigMapName)(source.Name, false) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), source.Name, msg))
@@ -6711,7 +6728,7 @@ func validateConfigMapNodeConfigSource(source *core.ConfigMapNodeConfigSource, f
 	}
 	// validate kubeletConfigKey against rules for configMap key names
 	if source.KubeletConfigKey == "" {
-		allErrs = append(allErrs, field.Required(fldPath.Child("kubeletConfigKey"), "kubeletConfigKey must be set"))
+		allErrs = append(allErrs, field.Required(fldPath.Child("kubeletConfigKey"), ""))
 	} else {
 		for _, msg := range validation.IsConfigMapKey(source.KubeletConfigKey) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("kubeletConfigKey"), source.KubeletConfigKey, msg))
@@ -7904,7 +7921,7 @@ func validateOS(podSpec *core.PodSpec, fldPath *field.Path, opts PodValidationOp
 		return allErrs
 	}
 	if len(os.Name) == 0 {
-		return append(allErrs, field.Required(fldPath.Child("name"), "cannot be empty"))
+		return append(allErrs, field.Required(fldPath.Child("name"), ""))
 	}
 	if !validOS.Has(os.Name) {
 		allErrs = append(allErrs, field.NotSupported(fldPath, os.Name, sets.List(validOS)))

@@ -102,6 +102,12 @@ linters:
           - revive
         text: "(ST1003: should not use underscores in Go names; func ([cC]onvert_.*_To_.*|[sS]etDefaults_)|exported: exported function (Convert|SetDefaults)_.* should be of the form)"
 
+      # The generated swagger docs also don't follow the naming convention.
+      - linters:
+          - staticcheck
+        text: "ST1003: should not use underscores in Go names"
+        path: types_swagger_doc_generated.go$
+
       - path: (.+)\.go$
         # staticcheck: Developers tend to write in C-style with an explicit 'break' in a 'switch', so it's ok to ignore
         text: ineffective break statement. Did you mean to break out of the outer loop
@@ -131,7 +137,7 @@ linters:
     - kubeapilinter
     - logcheck
     - revive
-    - sortedfeatures
+    - sorted
     - staticcheck
     - testifylint
     - unused
@@ -211,11 +217,11 @@ linters:
             # this restriction. Whether we then do a global search/replace remains
             # to be decided.
             with-helpers .*
-      sortedfeatures:
+      sorted:
         # Installed there by hack/verify-golangci-lint.sh.
-        path: _output/local/bin/sortedfeatures.so
+        path: _output/local/bin/sorted.so
         description: check if feature gates are sorted
-        original-url: k8s.io/kubernetes/hack/tools/golangci-lint/sortedfeatures
+        original-url: k8s.io/kubernetes/hack/tools/golangci-lint/sorted
         settings:
           files:
             - cmd/kubeadm/app/features/features.go
