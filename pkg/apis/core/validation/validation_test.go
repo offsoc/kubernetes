@@ -60,8 +60,8 @@ const (
 
 var (
 	containerRestartPolicyAlways    = core.ContainerRestartPolicyAlways
-	containerRestartPolicyOnFailure = core.ContainerRestartPolicy("OnFailure")
-	containerRestartPolicyNever     = core.ContainerRestartPolicy("Never")
+	containerRestartPolicyOnFailure = core.ContainerRestartPolicyOnFailure
+	containerRestartPolicyNever     = core.ContainerRestartPolicyNever
 	containerRestartPolicyInvalid   = core.ContainerRestartPolicy("invalid")
 	containerRestartPolicyEmpty     = core.ContainerRestartPolicy("")
 	defaultGracePeriod              = ptr.To[int64](30)
@@ -2333,6 +2333,7 @@ func TestAlphaPVVolumeModeUpdate(t *testing.T) {
 }
 
 func TestValidatePersistentVolumeClaimUpdate(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.33"))
 	block := core.PersistentVolumeBlock
 	file := core.PersistentVolumeFilesystem
 	invalidAPIGroup := "^invalid"
@@ -3031,21 +3032,45 @@ func TestValidatePersistentVolumeClaimUpdate(t *testing.T) {
 			enableVolumeAttributesClass: true,
 			isExpectedFailure:           false,
 		},
-		"invalid-update-volume-attributes-class": {
+		"valid-update-volume-attributes-class-to-nil": {
 			oldClaim:                    validClaimVolumeAttributesClass1,
 			newClaim:                    validClaimNilVolumeAttributesClass,
 			enableVolumeAttributesClass: true,
-			isExpectedFailure:           true,
+			isExpectedFailure:           false,
 		},
-		"invalid-update-volume-attributes-class-to-nil": {
-			oldClaim:                    validClaimVolumeAttributesClass1,
-			newClaim:                    validClaimNilVolumeAttributesClass,
-			enableVolumeAttributesClass: true,
-			isExpectedFailure:           true,
-		},
-		"invalid-update-volume-attributes-class-to-empty": {
+		"valid-update-volume-attributes-class-to-empty": {
 			oldClaim:                    validClaimVolumeAttributesClass1,
 			newClaim:                    validClaimEmptyVolumeAttributesClass,
+			enableVolumeAttributesClass: true,
+			isExpectedFailure:           false,
+		},
+		"invalid-update-volume-attributes-class-to-nil-when-current-vac-set": {
+			oldClaim: func() *core.PersistentVolumeClaim {
+				clone := validClaimVolumeAttributesClass1.DeepCopy()
+				clone.Status.CurrentVolumeAttributesClassName = ptr.To("vac1")
+				return clone
+			}(),
+			newClaim: func() *core.PersistentVolumeClaim {
+				clone := validClaimNilVolumeAttributesClass.DeepCopy()
+				clone.Status.CurrentVolumeAttributesClassName = ptr.To("vac1")
+				clone.Spec.VolumeAttributesClassName = nil
+				return clone
+			}(),
+			enableVolumeAttributesClass: true,
+			isExpectedFailure:           true,
+		},
+		"invalid-update-volume-attributes-class-to-empty-when-current-vac-set": {
+			oldClaim: func() *core.PersistentVolumeClaim {
+				clone := validClaimVolumeAttributesClass1.DeepCopy()
+				clone.Status.CurrentVolumeAttributesClassName = ptr.To("vac1")
+				return clone
+			}(),
+			newClaim: func() *core.PersistentVolumeClaim {
+				clone := validClaimNilVolumeAttributesClass.DeepCopy()
+				clone.Status.CurrentVolumeAttributesClassName = ptr.To("vac1")
+				clone.Spec.VolumeAttributesClassName = ptr.To("")
+				return clone
+			}(),
 			enableVolumeAttributesClass: true,
 			isExpectedFailure:           true,
 		},
@@ -6137,7 +6162,7 @@ func TestRelaxedValidateEnv(t *testing.T) {
 			Name:      "abc",
 			ValueFrom: &core.EnvVarSource{},
 		}},
-		expectedError: "[0].valueFrom: Invalid value: \"\": must specify one of: `fieldRef`, `resourceFieldRef`, `configMapKeyRef` or `secretKeyRef`",
+		expectedError: "field[0].valueFrom: Invalid value: \"\": must specify one of: `fieldRef`, `resourceFieldRef`, `configMapKeyRef` or `secretKeyRef",
 	}, {
 		name: "valueFrom.fieldRef and valueFrom.secretKeyRef specified",
 		envs: []core.EnvVar{{
@@ -6547,7 +6572,7 @@ func TestValidateEnv(t *testing.T) {
 			Name:      "abc",
 			ValueFrom: &core.EnvVarSource{},
 		}},
-		expectedError: "[0].valueFrom: Invalid value: \"\": must specify one of: `fieldRef`, `resourceFieldRef`, `configMapKeyRef` or `secretKeyRef`",
+		expectedError: "[0].valueFrom: Invalid value: \"\": must specify one of: `fieldRef`, `resourceFieldRef`, `configMapKeyRef` or `secretKeyRef",
 	}, {
 		name: "valueFrom.fieldRef and valueFrom.secretKeyRef specified",
 		envs: []core.EnvVar{{
@@ -6967,6 +6992,208 @@ func TestValidateEnvFrom(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestValidateEnvVarValueFromFileKeyRef(t *testing.T) {
+	testCases := []struct {
+		name         string
+		envVar       core.EnvVar
+		opts         PodValidationOptions
+		expectedErrs field.ErrorList
+	}{
+		{
+			name: "accept valid file key reference with all required fields",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "path/to/file.env",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts:         PodValidationOptions{},
+			expectedErrs: field.ErrorList{},
+		},
+		{
+			name: "reject file key reference when key field is empty",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "path/to/file.env",
+						Key:        "",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("valueFrom.fileKeyRef.key"), ""),
+			},
+		},
+		{
+			name: "reject file key reference when key contains invalid characters",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "path/to/file.env",
+						Key:        "bad=key",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("valueFrom.fileKeyRef.key"), "", "valid environment"),
+			},
+		},
+		{
+			name: "reject when both value and valueFrom.fileKeyRef are specified",
+			envVar: core.EnvVar{
+				Name:  "foo",
+				Value: "some-value",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "path/to/file.env",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("valueFrom"), "", "not empty"),
+			},
+		},
+		{
+			name: "reject file key reference when volumeName is empty",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "",
+						Path:       "path/to/file.env",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("valueFrom.fileKeyRef.volumeName"), ""),
+			},
+		},
+		{
+			name: "reject file key reference when volumeName is invalid",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "INVALID_NAME!",
+						Path:       "path/to/file.env",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				{
+					Type:     field.ErrorTypeInvalid,
+					Field:    field.NewPath("valueFrom.fileKeyRef.volumeName").String(),
+					BadValue: "INVALID_NAME!",
+					Detail:   "a lowercase RFC 1123 label must consist of",
+					Origin:   "format=dns-label",
+				},
+			},
+		},
+		{
+			name: "reject file key reference when path is empty",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("valueFrom.fileKeyRef.path"), ""),
+			},
+		},
+		{
+			name: "reject file key reference when path contains backsteps",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "../etc/passwd",
+						Key:        "MY_VAR",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("valueFrom.fileKeyRef.path"), "../etc/passwd", "must not contain '..'"),
+			},
+		},
+		{
+			name: "reject file key reference when multiple fields are invalid",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "!badname",
+						Path:       "../badpath",
+						Key:        "bad=key",
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("valueFrom.fileKeyRef.key"), "bad=key", "environment variable"),
+				{
+					Type:     field.ErrorTypeInvalid,
+					Field:    field.NewPath("valueFrom.fileKeyRef.volumeName").String(),
+					BadValue: "!badname",
+					Detail:   "a lowercase RFC 1123 label must consist of",
+					Origin:   "format=dns-label",
+				},
+				field.Invalid(field.NewPath("valueFrom.fileKeyRef.path"), "../badpath", "must not contain '..'"),
+			},
+		},
+		{
+			name: "accept file key reference with optional true and missing key",
+			envVar: core.EnvVar{
+				Name: "foo",
+				ValueFrom: &core.EnvVarSource{
+					FileKeyRef: &core.FileKeySelector{
+						VolumeName: "volume-name",
+						Path:       "path/to/file.env",
+						Key:        "",
+						Optional:   ptr.To(true),
+					},
+				},
+			},
+			opts: PodValidationOptions{},
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("valueFrom.fileKeyRef.key"), ""),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateEnvVarValueFrom(tc.envVar, field.NewPath("valueFrom"), tc.opts)
+			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin().ByDetailSubstring()
+			matcher.Test(t, tc.expectedErrs, errs)
+		})
 	}
 }
 
@@ -10230,12 +10457,22 @@ func TestValidatePodSpec(t *testing.T) {
 				SupplementalGroupsPolicy: &goodSupplementalGroupsPolicy,
 			}),
 		),
+		"populate PodLevelResources without OS": podtest.MakePod("",
+			podtest.SetPodResources(&core.ResourceRequirements{Limits: getResources("100m", "200Mi", "", "")}),
+			podtest.SetContainers(podtest.MakeContainer("container")),
+		),
+		"populate PodLevelResources with valid OS": podtest.MakePod("",
+			podtest.SetPodResources(&core.ResourceRequirements{Limits: getResources("100m", "200Mi", "", "")}),
+			podtest.SetContainers(podtest.MakeContainer("container")),
+			podtest.SetOS(core.Linux),
+		),
 	}
 	for k, v := range successCases {
 		t.Run(k, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StrictIPCIDRValidation, true)
 			opts := PodValidationOptions{
-				ResourceIsPod: true,
+				ResourceIsPod:            true,
+				PodLevelResourcesEnabled: true,
 			}
 			if errs := ValidatePodSpec(&v.Spec, nil, field.NewPath("field"), opts); len(errs) != 0 {
 				t.Errorf("expected success: %v", errs)
@@ -10247,12 +10484,22 @@ func TestValidatePodSpec(t *testing.T) {
 		"populate HostAliases with legacy IP with legacy validation": podtest.MakePod("",
 			podtest.SetHostAliases(core.HostAlias{IP: "012.034.056.078", Hostnames: []string{"host1", "host2"}}),
 		),
+		"populate PodLevelResources without OS using legacy validation": podtest.MakePod("",
+			podtest.SetPodResources(&core.ResourceRequirements{Limits: getResources("100m", "200Mi", "", "")}),
+			podtest.SetContainers(podtest.MakeContainer("container")),
+		),
+		"populate PodLevelResources with valid OS using legacy validation": podtest.MakePod("",
+			podtest.SetPodResources(&core.ResourceRequirements{Limits: getResources("100m", "200Mi", "", "")}),
+			podtest.SetContainers(podtest.MakeContainer("container")),
+			podtest.SetOS(core.Linux),
+		),
 	}
 	for k, v := range legacyValidationCases {
 		t.Run(k, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StrictIPCIDRValidation, false)
 			opts := PodValidationOptions{
-				ResourceIsPod: true,
+				ResourceIsPod:            true,
+				PodLevelResourcesEnabled: false,
 			}
 			if errs := ValidatePodSpec(&v.Spec, nil, field.NewPath("field"), opts); len(errs) != 0 {
 				t.Errorf("expected success: %v", errs)
@@ -10268,126 +10515,145 @@ func TestValidatePodSpec(t *testing.T) {
 	minGroupID = int64(-1)
 	maxGroupID = int64(2147483648)
 
-	failureCases := map[string]core.Pod{
-		"bad volume":               *podtest.MakePod("", podtest.SetVolumes(core.Volume{})),
-		"no containers":            *podtest.MakePod("", podtest.SetContainers()),
-		"bad container":            *podtest.MakePod("", podtest.SetContainers(core.Container{})),
-		"bad init container":       *podtest.MakePod("", podtest.SetInitContainers(core.Container{})),
-		"bad DNS policy":           *podtest.MakePod("", podtest.SetDNSPolicy(core.DNSPolicy("invalid"))),
-		"bad service account name": *podtest.MakePod("", podtest.SetServiceAccountName("invalidName")),
-		"bad restart policy":       *podtest.MakePod("", podtest.SetRestartPolicy("UnknowPolicy")),
-		"with hostNetwork hostPort unspecified": *podtest.MakePod("",
+	failureCases := map[string]struct {
+		pod            core.Pod
+		expectedErrors field.ErrorList
+	}{
+		"bad volume":               {pod: *podtest.MakePod("", podtest.SetVolumes(core.Volume{}))},
+		"no containers":            {pod: *podtest.MakePod("", podtest.SetContainers())},
+		"bad container":            {pod: *podtest.MakePod("", podtest.SetContainers(core.Container{}))},
+		"bad init container":       {pod: *podtest.MakePod("", podtest.SetInitContainers(core.Container{}))},
+		"bad DNS policy":           {pod: *podtest.MakePod("", podtest.SetDNSPolicy(core.DNSPolicy("invalid")))},
+		"bad service account name": {pod: *podtest.MakePod("", podtest.SetServiceAccountName("invalidName"))},
+		"bad restart policy":       {pod: *podtest.MakePod("", podtest.SetRestartPolicy("UnknowPolicy"))},
+		"with hostNetwork hostPort unspecified": {pod: *podtest.MakePod("",
 			podtest.SetContainers(podtest.MakeContainer("ctr",
 				podtest.SetContainerPorts(core.ContainerPort{HostPort: 0, ContainerPort: 2600, Protocol: "TCP"}))),
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostNetwork: true,
 			}),
-		),
-		"with hostNetwork hostPort not equal to containerPort": *podtest.MakePod("",
+		)},
+		"with hostNetwork hostPort not equal to containerPort": {pod: *podtest.MakePod("",
 			podtest.SetContainers(podtest.MakeContainer("ctr",
 				podtest.SetContainerPorts(core.ContainerPort{HostPort: 8080, ContainerPort: 2600, Protocol: "TCP"}))),
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostNetwork: true,
 			}),
-		),
-		"with hostAliases with invalid IP": *podtest.MakePod("",
+		)},
+		"with hostAliases with invalid IP": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostNetwork: false,
 			}),
 			podtest.SetHostAliases(core.HostAlias{IP: "999.999.999.999", Hostnames: []string{"host1", "host2"}}),
-		),
-		"with hostAliases with invalid legacy IP with strict IP validation": *podtest.MakePod("",
+		)},
+		"with hostAliases with invalid legacy IP with strict IP validation": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostNetwork: false,
 			}),
 			podtest.SetHostAliases(core.HostAlias{IP: "001.002.003.004", Hostnames: []string{"host1", "host2"}}),
-		),
-		"with hostAliases with invalid hostname": *podtest.MakePod("",
+		)},
+		"with hostAliases with invalid hostname": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostNetwork: false,
 			}),
 			podtest.SetHostAliases(core.HostAlias{IP: "12.34.56.78", Hostnames: []string{"@#$^#@#$"}}),
-		),
-		"bad supplementalGroups large than math.MaxInt32": *podtest.MakePod("",
+		)},
+		"bad supplementalGroups large than math.MaxInt32": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				SupplementalGroups: []int64{maxGroupID, 1234},
 			}),
-		),
-		"bad supplementalGroups less than 0": *podtest.MakePod("",
+		)},
+		"bad supplementalGroups less than 0": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				SupplementalGroups: []int64{minGroupID, 1234},
 			}),
-		),
-		"bad runAsUser large than math.MaxInt32": *podtest.MakePod("",
+		)},
+		"bad runAsUser large than math.MaxInt32": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				RunAsUser: &maxUserID,
 			}),
-		),
-		"bad runAsUser less than 0": *podtest.MakePod("",
+		)},
+		"bad runAsUser less than 0": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				RunAsUser: &minUserID,
 			}),
-		),
-		"bad fsGroup large than math.MaxInt32": *podtest.MakePod("",
+		)},
+		"bad fsGroup large than math.MaxInt32": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				FSGroup: &maxGroupID,
 			}),
-		),
-		"bad fsGroup less than 0": *podtest.MakePod("",
+		)},
+		"bad fsGroup less than 0": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				FSGroup: &minGroupID,
 			}),
-		),
-		"bad-active-deadline-seconds": *podtest.MakePod("",
+		)},
+		"bad-active-deadline-seconds": {pod: *podtest.MakePod("",
 			podtest.SetActiveDeadlineSeconds(activeDeadlineSecondsZero),
-		),
-		"active-deadline-seconds-too-large": *podtest.MakePod("",
+		)},
+		"active-deadline-seconds-too-large": {pod: *podtest.MakePod("",
 			podtest.SetActiveDeadlineSeconds(activeDeadlineSecondsTooLarge),
-		),
-		"bad nodeName": *podtest.MakePod("",
+		)},
+		"bad nodeName": {pod: *podtest.MakePod("",
 			podtest.SetNodeName("node name"),
-		),
-		"bad PriorityClassName": *podtest.MakePod("",
+		)},
+		"bad PriorityClassName": {pod: *podtest.MakePod("",
 			podtest.SetPriorityClassName("InvalidName"),
-		),
-		"ShareProcessNamespace and HostPID both set": *podtest.MakePod("",
+		)},
+		"ShareProcessNamespace and HostPID both set": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				HostPID:               true,
 				ShareProcessNamespace: &[]bool{true}[0],
 			}),
-		),
-		"bad RuntimeClassName": *podtest.MakePod("",
+		)},
+		"bad RuntimeClassName": {pod: *podtest.MakePod("",
 			podtest.SetRuntimeClassName("invalid/sandbox"),
-		),
-		"bad empty fsGroupchangepolicy": *podtest.MakePod("",
+		)},
+		"bad empty fsGroupchangepolicy": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				FSGroupChangePolicy: &badfsGroupChangePolicy2,
 			}),
-		),
-		"bad invalid fsgroupchangepolicy": *podtest.MakePod("",
+		)},
+		"bad invalid fsgroupchangepolicy": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				FSGroupChangePolicy: &badfsGroupChangePolicy1,
 			}),
-		),
-		"bad empty SupplementalGroupsPolicy": *podtest.MakePod("",
+		)},
+		"bad empty SupplementalGroupsPolicy": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				SupplementalGroupsPolicy: &badSupplementalGroupsPolicy2,
 			}),
-		),
-		"bad invalid SupplementalGroupsPolicy": *podtest.MakePod("",
+		)},
+		"bad invalid SupplementalGroupsPolicy": {pod: *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				SupplementalGroupsPolicy: &badSupplementalGroupsPolicy1,
 			}),
-		),
+		)},
+		"bad OS for PodLevelResources hides bad cpu limit": {
+			pod: *podtest.MakePod("",
+				podtest.SetPodResources(&core.ResourceRequirements{Limits: getResources("100m", "200Mi", "", "")}),
+				podtest.SetContainers(podtest.MakeContainer("container",
+					podtest.SetContainerResources(core.ResourceRequirements{
+						Limits: getResources("200m", "200Mi", "", ""),
+					}))),
+				podtest.SetOS(core.Windows),
+			),
+			expectedErrors: field.ErrorList{
+				field.Forbidden(field.NewPath("field.resources"), "may not be set for a windows pod"),
+			},
+		},
 	}
-	for k, v := range failureCases {
+	for k, tc := range failureCases {
 		t.Run(k, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StrictIPCIDRValidation, true)
 			opts := PodValidationOptions{
-				ResourceIsPod: true,
+				ResourceIsPod:            true,
+				PodLevelResourcesEnabled: true,
 			}
-			if errs := ValidatePodSpec(&v.Spec, nil, field.NewPath("field"), opts); len(errs) == 0 {
-				t.Errorf("expected failure")
+			errs := ValidatePodSpec(&tc.pod.Spec, nil, field.NewPath("field"), opts)
+			if len(tc.expectedErrors) != 0 {
+				matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin().ByDetailSubstring()
+				matcher.Test(t, tc.expectedErrors, errs)
 			}
 		})
 	}
@@ -10873,6 +11139,63 @@ func TestValidatePod(t *testing.T) {
 											"version": "live",
 										},
 									},
+								},
+							},
+						},
+					},
+				},
+			}),
+		),
+		"valid PodCertificate projected volume source, minimal": *podtest.MakePod("valid-podcertificate-1",
+			podtest.SetVolumes(core.Volume{
+				Name: "projected-volume",
+				VolumeSource: core.VolumeSource{
+					Projected: &core.ProjectedVolumeSource{
+						Sources: []core.VolumeProjection{
+							{
+								PodCertificate: &core.PodCertificateProjection{
+									SignerName:           "example.com/foo",
+									KeyType:              "ED25519",
+									CredentialBundlePath: "credbundle.pem",
+								},
+							},
+						},
+					},
+				},
+			}),
+		),
+		"valid PodCertificate projected volume source, explicit max expiration": *podtest.MakePod("valid-podcertificate-3",
+			podtest.SetVolumes(core.Volume{
+				Name: "projected-volume",
+				VolumeSource: core.VolumeSource{
+					Projected: &core.ProjectedVolumeSource{
+						Sources: []core.VolumeProjection{
+							{
+								PodCertificate: &core.PodCertificateProjection{
+									SignerName:           "example.com/foo",
+									KeyType:              "ED25519",
+									MaxExpirationSeconds: ptr.To[int32](3600),
+									CredentialBundlePath: "credbundle.pem",
+								},
+							},
+						},
+					},
+				},
+			}),
+		),
+		"valid PodCertificate projected volume source, separate key/cert": *podtest.MakePod("valid-podcertificate-4",
+			podtest.SetVolumes(core.Volume{
+				Name: "projected-volume",
+				VolumeSource: core.VolumeSource{
+					Projected: &core.ProjectedVolumeSource{
+						Sources: []core.VolumeProjection{
+							{
+								PodCertificate: &core.PodCertificateProjection{
+									SignerName:           "example.com/foo",
+									KeyType:              "ED25519",
+									MaxExpirationSeconds: ptr.To[int32](3600),
+									KeyPath:              "key.pem",
+									CertificateChainPath: "certificates.pem",
 								},
 							},
 						},
@@ -12354,6 +12677,172 @@ func TestValidatePod(t *testing.T) {
 									ClusterTrustBundle: &core.ClusterTrustBundleProjection{
 										Path:       "foo-path",
 										SignerName: ptr.To("example.com/foo/invalid"),
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with no signer name": {
+			expectedError: "Required value",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										KeyType:              "ED25519",
+										CredentialBundlePath: "credbundle.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with bad signer name": {
+			expectedError: "must be a fully qualified domain and path of the form",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo/invalid",
+										KeyType:              "ED25519",
+										CredentialBundlePath: "credbundle.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with bad key type": {
+			expectedError: "Unsupported value: \"BAD\"",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo",
+										KeyType:              "BAD",
+										CredentialBundlePath: "credbundle.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with no paths": {
+			expectedError: "Required value: specify at least one of credentialBundlePath, keyPath, and certificateChainPath",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName: "example.com/foo",
+										KeyType:    "ED25519",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with conflicting paths": {
+			expectedError: "conflicting duplicate paths",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo",
+										KeyType:              "ED25519",
+										KeyPath:              "same.pem",
+										CertificateChainPath: "same.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with bad cred bundle path": {
+			expectedError: "must be a relative path",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo",
+										CredentialBundlePath: "/absolute.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with bad key path": {
+			expectedError: "must be a relative path",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo",
+										KeyPath:              "/absolute.pem",
+										CertificateChainPath: "certificates.pem",
+									},
+								},
+							},
+						},
+					},
+				}),
+			),
+		},
+		"PodCertificate projected volume with bad certificates path": {
+			expectedError: "must be a relative path",
+			spec: *podtest.MakePod("pod1",
+				podtest.SetVolumes(core.Volume{
+					Name: "projected-volume",
+					VolumeSource: core.VolumeSource{
+						Projected: &core.ProjectedVolumeSource{
+							Sources: []core.VolumeProjection{
+								{
+									PodCertificate: &core.PodCertificateProjection{
+										SignerName:           "example.com/foo",
+										KeyPath:              "key.pem",
+										CertificateChainPath: "/certificates.pem",
 									},
 								},
 							},
@@ -19523,6 +20012,90 @@ func TestValidateServiceUpdate(t *testing.T) {
 	}
 }
 
+func TestValidatePodResources(t *testing.T) {
+	path := field.NewPath("spec")
+	resourceClaimName := "resource-claim"
+	podClaimNames := sets.New(resourceClaimName)
+	podValidationOpts := PodValidationOptions{AllowIndivisibleHugePagesValues: true}
+
+	tests := []struct {
+		name           string
+		osName         core.OSName
+		podResources   core.ResourceRequirements
+		expectedErrors field.ErrorList
+	}{{
+		name:   "supported os",
+		osName: core.Linux,
+		podResources: core.ResourceRequirements{
+			Requests: core.ResourceList{
+				core.ResourceCPU:    resource.MustParse("10"),
+				core.ResourceMemory: resource.MustParse("10Mi"),
+			},
+			Limits: core.ResourceList{
+				core.ResourceCPU:                     resource.MustParse("20"),
+				core.ResourceMemory:                  resource.MustParse("20Mi"),
+				core.ResourceHugePagesPrefix + "2Mi": resource.MustParse("100Mi"),
+			},
+		},
+	}, {
+		name:   "unsupported os",
+		osName: core.Windows,
+		podResources: core.ResourceRequirements{
+			Requests: core.ResourceList{
+				core.ResourceCPU:    resource.MustParse("10"),
+				core.ResourceMemory: resource.MustParse("10Mi"),
+			},
+			Limits: core.ResourceList{
+				core.ResourceCPU:                     resource.MustParse("20"),
+				core.ResourceMemory:                  resource.MustParse("20Mi"),
+				core.ResourceHugePagesPrefix + "2Mi": resource.MustParse("100Mi"),
+			},
+		},
+		expectedErrors: field.ErrorList{
+			field.Forbidden(field.NewPath("spec.resources"), "may not be set for a windows pod"),
+		},
+	}, {
+		name:   "unsupported resource claims at pod level resources",
+		osName: core.Linux,
+		podResources: core.ResourceRequirements{
+			Requests: core.ResourceList{
+				core.ResourceCPU:    resource.MustParse("10"),
+				core.ResourceMemory: resource.MustParse("10Mi"),
+			},
+			Limits: core.ResourceList{
+				core.ResourceCPU:                     resource.MustParse("20"),
+				core.ResourceMemory:                  resource.MustParse("20Mi"),
+				core.ResourceHugePagesPrefix + "2Mi": resource.MustParse("100Mi"),
+			},
+			Claims: []core.ResourceClaim{
+				{Name: resourceClaimName},
+			},
+		},
+		expectedErrors: field.ErrorList{
+			field.Forbidden(field.NewPath("spec.resources.claims"), "claims may not be set for Resources at pod-level"),
+		},
+	},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			podSepc := podtest.MakePodSpec(
+				podtest.SetPodResources(&tc.podResources),
+				podtest.SetOS(tc.osName),
+				podtest.SetResourceClaims([]core.PodResourceClaim{{Name: resourceClaimName}}...),
+			)
+			errs := validatePodResources(&podSepc, podClaimNames, path, podValidationOpts)
+			if len(errs) != len(tc.expectedErrors) {
+				t.Errorf("expected %d errors, got %d errors, got errors: %v", len(tc.expectedErrors), len(errs), errs)
+			}
+			if len(tc.expectedErrors) != 0 {
+				matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin().ByDetailSubstring()
+				matcher.Test(t, tc.expectedErrors, errs)
+			}
+		})
+	}
+}
+
 func TestValidatePodResourceConsistency(t *testing.T) {
 	path := field.NewPath("resources")
 	tests := []struct {
@@ -19600,12 +20173,12 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 				Resources: core.ResourceRequirements{
 					Requests: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("8"),
-						core.ResourceMemory: resource.MustParse("3Mi"),
+						core.ResourceMemory: resource.MustParse("7Mi"),
 					},
 				},
 			},
 		},
-		expectedErrors: []string{"must be greater than or equal to aggregate container requests"},
+		expectedErrors: []string{"must be greater than or equal to aggregate container requests", "must be greater than or equal to aggregate container requests"},
 	}, {
 		name: "container requests with resources unsupported at pod-level",
 		podResources: core.ResourceRequirements{
@@ -19639,6 +20212,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 			Limits: core.ResourceList{
 				core.ResourceCPU:    resource.MustParse("10"),
 				core.ResourceMemory: resource.MustParse("10Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("10Mi"),
 			},
 		},
 		containers: []core.Container{
@@ -19647,6 +20221,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 					Limits: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("5"),
 						core.ResourceMemory: resource.MustParse("5Mi"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
 					},
 				},
 			}, {
@@ -19654,6 +20229,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 					Limits: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("4"),
 						core.ResourceMemory: resource.MustParse("3Mi"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
 					},
 				},
 			},
@@ -19664,6 +20240,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 			Limits: core.ResourceList{
 				core.ResourceCPU:    resource.MustParse("10"),
 				core.ResourceMemory: resource.MustParse("10Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("8Mi"),
 			},
 		},
 		containers: []core.Container{
@@ -19672,6 +20249,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 					Limits: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("5"),
 						core.ResourceMemory: resource.MustParse("5Mi"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
 					},
 				},
 			}, {
@@ -19679,6 +20257,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 					Limits: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("5"),
 						core.ResourceMemory: resource.MustParse("5Mi"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
 					},
 				},
 			},
@@ -19709,11 +20288,40 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 			},
 		},
 	}, {
+		name: "hugepage aggregate container limits greater than pod limits",
+		podResources: core.ResourceRequirements{
+			Limits: core.ResourceList{
+				core.ResourceCPU: resource.MustParse("10"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
+			},
+		},
+		containers: []core.Container{
+			{
+				Resources: core.ResourceRequirements{
+					Limits: core.ResourceList{
+						core.ResourceCPU: resource.MustParse("6"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
+					},
+				},
+			}, {
+				Resources: core.ResourceRequirements{
+					Limits: core.ResourceList{
+						core.ResourceCPU: resource.MustParse("6"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
+					},
+				},
+			},
+		},
+		expectedErrors: []string{
+			"must be greater than or equal to aggregate container limits",
+		},
+	}, {
 		name: "individual container limits greater than pod limits",
 		podResources: core.ResourceRequirements{
 			Limits: core.ResourceList{
 				core.ResourceCPU:    resource.MustParse("10"),
 				core.ResourceMemory: resource.MustParse("10Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
 			},
 		},
 		containers: []core.Container{
@@ -19722,11 +20330,14 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 					Limits: core.ResourceList{
 						core.ResourceCPU:    resource.MustParse("11"),
 						core.ResourceMemory: resource.MustParse("12Mi"),
+						core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("4Mi"),
 					},
 				},
 			},
 		},
 		expectedErrors: []string{
+			"must be greater than or equal to aggregate container limits",
+			"must be less than or equal to pod limits",
 			"must be less than or equal to pod limits",
 			"must be less than or equal to pod limits",
 		},
@@ -20140,6 +20751,7 @@ func TestValidateLimitRange(t *testing.T) {
 }
 
 func TestValidatePersistentVolumeClaimStatusUpdate(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.33"))
 	validClaim := testVolumeClaim("foo", "ns", core.PersistentVolumeClaimSpec{
 		AccessModes: []core.PersistentVolumeAccessMode{
 			core.ReadWriteOnce,
@@ -21808,6 +22420,9 @@ func TestValidateOSFields(t *testing.T) {
 		"Containers[*].ResizePolicy[*].RestartPolicy",
 		"Containers[*].ResizePolicy[*].ResourceName",
 		"Containers[*].RestartPolicy",
+		"Containers[*].RestartPolicyRules[*].Action",
+		"Containers[*].RestartPolicyRules[*].ExitCodes.Operator",
+		"Containers[*].RestartPolicyRules[*].ExitCodes.Values[*]",
 		"Containers[*].SecurityContext.RunAsNonRoot",
 		"Containers[*].Stdin",
 		"Containers[*].StdinOnce",
@@ -21835,6 +22450,9 @@ func TestValidateOSFields(t *testing.T) {
 		"EphemeralContainers[*].EphemeralContainerCommon.ResizePolicy[*].RestartPolicy",
 		"EphemeralContainers[*].EphemeralContainerCommon.ResizePolicy[*].ResourceName",
 		"EphemeralContainers[*].EphemeralContainerCommon.RestartPolicy",
+		"EphemeralContainers[*].EphemeralContainerCommon.RestartPolicyRules[*].Action",
+		"EphemeralContainers[*].EphemeralContainerCommon.RestartPolicyRules[*].ExitCodes.Operator",
+		"EphemeralContainers[*].EphemeralContainerCommon.RestartPolicyRules[*].ExitCodes.Values[*]",
 		"EphemeralContainers[*].EphemeralContainerCommon.Stdin",
 		"EphemeralContainers[*].EphemeralContainerCommon.StdinOnce",
 		"EphemeralContainers[*].EphemeralContainerCommon.TTY",
@@ -21848,6 +22466,7 @@ func TestValidateOSFields(t *testing.T) {
 		"EphemeralContainers[*].EphemeralContainerCommon.VolumeMounts[*]",
 		"HostAliases",
 		"Hostname",
+		"HostnameOverride",
 		"ImagePullSecrets",
 		"InitContainers[*].Args",
 		"InitContainers[*].Command",
@@ -21864,6 +22483,9 @@ func TestValidateOSFields(t *testing.T) {
 		"InitContainers[*].ResizePolicy[*].RestartPolicy",
 		"InitContainers[*].ResizePolicy[*].ResourceName",
 		"InitContainers[*].RestartPolicy",
+		"InitContainers[*].RestartPolicyRules[*].Action",
+		"InitContainers[*].RestartPolicyRules[*].ExitCodes.Operator",
+		"InitContainers[*].RestartPolicyRules[*].ExitCodes.Values[*]",
 		"InitContainers[*].Stdin",
 		"InitContainers[*].StdinOnce",
 		"InitContainers[*].TTY",
@@ -24916,6 +25538,7 @@ func TestValidateHostUsers(t *testing.T) {
 		name    string
 		success bool
 		spec    *core.PodSpec
+		opts    PodValidationOptions
 	}{{
 		name:    "empty",
 		success: true,
@@ -24995,7 +25618,7 @@ func TestValidateHostUsers(t *testing.T) {
 			}},
 		},
 	}, {
-		name:    "hostUsers=true - unsupported volume",
+		name:    "hostUsers=true - stateful volume",
 		success: true,
 		spec: &core.PodSpec{
 			SecurityContext: &core.PodSecurityContext{
@@ -25035,6 +25658,107 @@ func TestValidateHostUsers(t *testing.T) {
 				HostIPC:   true,
 			},
 		},
+	}, {
+		name:    "hostUsers=false & container volumeDevice",
+		success: false,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			Containers: []core.Container{{
+				Name: "test-container",
+				VolumeDevices: []core.VolumeDevice{{
+					Name:       "test-volume",
+					DevicePath: "/dev/test-device",
+				}},
+			}},
+		},
+	}, {
+		name:    "hostUsers=false & initContainer volumeDevice",
+		success: false,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			InitContainers: []core.Container{{
+				Name: "test-container",
+				VolumeDevices: []core.VolumeDevice{{
+					Name:       "test-volume",
+					DevicePath: "/dev/test-device",
+				}},
+			}},
+		},
+	}, {
+		name:    "hostUsers=false & ephemeralContainer volumeDevice",
+		success: false,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			EphemeralContainers: []core.EphemeralContainer{{
+				EphemeralContainerCommon: core.EphemeralContainerCommon{
+					Name: "test-container",
+					VolumeDevices: []core.VolumeDevice{{
+						Name:       "test-volume",
+						DevicePath: "/dev/test-device",
+					}}},
+			}},
+		},
+	}, {
+		name:    "opts: Allow... & hostUsers=false & container volumeDevice",
+		success: true,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			Containers: []core.Container{{
+				Name: "test-container",
+				VolumeDevices: []core.VolumeDevice{{
+					Name:       "test-volume",
+					DevicePath: "/dev/test-device",
+				}},
+			}},
+		},
+		opts: PodValidationOptions{
+			AllowUserNamespacesWithVolumeDevices: true,
+		},
+	}, {
+		name:    "opts: Allow... & hostUsers=false & initContainer volumeDevice",
+		success: true,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			InitContainers: []core.Container{{
+				Name: "test-container",
+				VolumeDevices: []core.VolumeDevice{{
+					Name:       "test-volume",
+					DevicePath: "/dev/test-device",
+				}},
+			}},
+		},
+		opts: PodValidationOptions{
+			AllowUserNamespacesWithVolumeDevices: true,
+		},
+	}, {
+		name:    "opts: Allow... & hostUsers=false & ephemeralContainer volumeDevice",
+		success: true,
+		spec: &core.PodSpec{
+			SecurityContext: &core.PodSecurityContext{
+				HostUsers: &falseVar,
+			},
+			EphemeralContainers: []core.EphemeralContainer{{
+				EphemeralContainerCommon: core.EphemeralContainerCommon{
+					Name: "test-container",
+					VolumeDevices: []core.VolumeDevice{{
+						Name:       "test-volume",
+						DevicePath: "/dev/test-device",
+					}}},
+			}},
+		},
+		opts: PodValidationOptions{
+			AllowUserNamespacesWithVolumeDevices: true,
+		},
 	},
 	}
 
@@ -25042,13 +25766,118 @@ func TestValidateHostUsers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fPath := field.NewPath("spec")
 
-			allErrs := validateHostUsers(tc.spec, fPath)
+			allErrs := validateHostUsers(tc.spec, fPath, tc.opts)
 			if !tc.success && len(allErrs) == 0 {
 				t.Errorf("Unexpected success")
 			}
 			if tc.success && len(allErrs) != 0 {
 				t.Errorf("Unexpected error(s): %v", allErrs)
 			}
+		})
+	}
+}
+
+func TestValidatePodHostName(t *testing.T) {
+	tests := []struct {
+		name         string
+		spec         core.PodSpec
+		expectedErrs field.ErrorList
+	}{
+		{
+			name: "Set HostnameOverride, but empty string",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To(""),
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.hostnameOverride"), "", "RFC 1123"),
+			},
+		},
+		{
+			name: "Set HostnameOverride, less than 64 characters",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To(strings.Repeat("a", 1)),
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "HostnameOverride is set should not error",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To("custom-host"),
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "Set HostnameOverride, equal 64 characters",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To(strings.Repeat("a", 64)),
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "Set HostnameOverride, but longer than 64 characters",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To(strings.Repeat("a", 65)),
+			},
+			expectedErrs: field.ErrorList{
+				field.TooLong(field.NewPath("spec.hostnameOverride"), "", 64),
+			},
+		},
+		{
+			name: "Set HostnameOverride, but not RFC 1123 DNS subdomain should error",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To("Not-RFC1123"),
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.hostnameOverride"), "", "RFC 1123"),
+			},
+		},
+		{
+			name: "SetHostnameAsFQDN=true and HostnameOverride is set should error",
+			spec: core.PodSpec{
+				SetHostnameAsFQDN: ptr.To(true),
+				HostnameOverride:  ptr.To("custom-host"),
+			},
+			expectedErrs: field.ErrorList{
+				field.Forbidden(field.NewPath("spec.hostnameOverride"), "setHostnameAsFQDN"),
+			},
+		},
+		{
+			name: "SetHostnameAsFQDN=false and HostnameOverride is set should not error",
+			spec: core.PodSpec{
+				SetHostnameAsFQDN: ptr.To(false),
+				HostnameOverride:  ptr.To("custom-host"),
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "HostNetwork=true and HostnameOverride is set should error",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To("custom-host"),
+				SecurityContext: &core.PodSecurityContext{
+					HostNetwork: true,
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Forbidden(field.NewPath("spec.hostnameOverride"), "hostNetwork"),
+			},
+		},
+		{
+			name: "HostNetwork=false and HostnameOverride is set should not error",
+			spec: core.PodSpec{
+				HostnameOverride: ptr.To("custom-host"),
+				SecurityContext: &core.PodSecurityContext{
+					HostNetwork: false,
+				},
+			},
+			expectedErrs: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validatePodHostName(&tt.spec, field.NewPath("spec"))
+			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin().ByDetailSubstring()
+			matcher.Test(t, tt.expectedErrs, errs)
 		})
 	}
 }
@@ -26880,12 +27709,12 @@ func TestValidatePodResize(t *testing.T) {
 			test: "no restart policy: memory limit decrease",
 			old:  mkPod(core.ResourceList{}, getResources("100m", "200Mi", "", "")),
 			new:  mkPod(core.ResourceList{}, getResources("100m", "100Mi", "", "")),
-			err:  "memory limits cannot be decreased",
+			err:  "",
 		}, {
 			test: "restart NotRequired: memory limit decrease",
 			old:  mkPod(core.ResourceList{}, getResources("100m", "200Mi", "", ""), resizePolicy("memory", core.NotRequired)),
 			new:  mkPod(core.ResourceList{}, getResources("100m", "100Mi", "", ""), resizePolicy("memory", core.NotRequired)),
-			err:  "memory limits cannot be decreased",
+			err:  "",
 		}, {
 			test: "RestartContainer: memory limit decrease",
 			old:  mkPod(core.ResourceList{}, getResources("100m", "200Mi", "", ""), resizePolicy("memory", core.RestartContainer)),
@@ -27104,19 +27933,9 @@ func TestValidatePodResize(t *testing.T) {
 			new:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "200Mi", "", ""), core.ContainerRestartPolicyAlways),
 			err:  "",
 		}, {
-			test: "memory limit decrease for sidecar containers, no resize policy",
+			test: "memory limit decrease for sidecar containers",
 			old:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "200Mi", "", ""), core.ContainerRestartPolicyAlways),
 			new:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "100Mi", "", ""), core.ContainerRestartPolicyAlways),
-			err:  "memory limits cannot be decreased",
-		}, {
-			test: "memory limit decrease for sidecar containers, resize policy NotRequired",
-			old:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "200Mi", "", ""), core.ContainerRestartPolicyAlways, resizePolicy(core.ResourceMemory, core.NotRequired)),
-			new:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "100Mi", "", ""), core.ContainerRestartPolicyAlways, resizePolicy(core.ResourceMemory, core.NotRequired)),
-			err:  "memory limits cannot be decreased",
-		}, {
-			test: "memory limit decrease for sidecar containers, resize policy RestartContainer",
-			old:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "200Mi", "", ""), core.ContainerRestartPolicyAlways, resizePolicy(core.ResourceMemory, core.RestartContainer)),
-			new:  mkPodWithInitContainers(core.ResourceList{}, getResources("100m", "100Mi", "", ""), core.ContainerRestartPolicyAlways, resizePolicy(core.ResourceMemory, core.RestartContainer)),
 			err:  "",
 		}, {
 			test: "storage limit change for sidecar containers",
@@ -27382,6 +28201,928 @@ func TestValidateStopSignal(t *testing.T) {
 				if tc.expectErr[0].Error() != errs[0].Error() {
 					t.Errorf("Unexpected error(s): %v", errs)
 				}
+			}
+		})
+	}
+}
+
+func TestValidateFileKeyRefVolume(t *testing.T) {
+	testCases := []struct {
+		name         string
+		podSpec      *core.PodSpec
+		expectedErrs field.ErrorList
+	}{
+		{
+			name: "should pass when no FileKeyRef environment variables are used",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name:  "STATIC_VAR",
+								Value: "static_value",
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "some-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/data",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should pass when FileKeyRef references a valid emptyDir volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "config-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should pass when FileKeyRef references emptyDir volume with memory medium",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "CACHE_CONFIG",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "cache-volume",
+										Path:       "cache.env",
+										Key:        "CACHE_CONFIG",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "cache-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{
+								Medium: core.StorageMediumMemory,
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should pass when FileKeyRef references emptyDir volume and other volume types exist",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "config-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+					{
+						Name: "other-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/data",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should fail when FileKeyRef references a non-existent volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "non-existent-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.NotFound(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "volume \"non-existent-volume\" referenced by FileKeyRef does not exist"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references a hostPath volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "config-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "config-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/config",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "config-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references a secret volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "API_KEY",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "secret-volume",
+										Path:       "api.env",
+										Key:        "API_KEY",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "secret-volume",
+						VolumeSource: core.VolumeSource{
+							Secret: &core.SecretVolumeSource{
+								SecretName: "my-secret",
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "secret-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references a configMap volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "CONFIG_VALUE",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "configmap-volume",
+										Path:       "config.env",
+										Key:        "CONFIG_VALUE",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "configmap-volume",
+						VolumeSource: core.VolumeSource{
+							ConfigMap: &core.ConfigMapVolumeSource{
+								LocalObjectReference: core.LocalObjectReference{
+									Name: "my-config",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "configmap-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references a persistentVolumeClaim volume",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATA_PATH",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "pvc-volume",
+										Path:       "data.env",
+										Key:        "DATA_PATH",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "pvc-volume",
+						VolumeSource: core.VolumeSource{
+							PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{
+								ClaimName: "my-pvc",
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "pvc-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references multiple non-emptyDir volumes",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "host-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+							{
+								Name: "API_KEY",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "configmap-volume",
+										Path:       "api.env",
+										Key:        "API_KEY",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "host-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/config",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+					{
+						Name: "configmap-volume",
+						VolumeSource: core.VolumeSource{
+							ConfigMap: &core.ConfigMapVolumeSource{
+								LocalObjectReference: core.LocalObjectReference{
+									Name: "my-config",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "", "referenced volume must be of type emptyDir"),
+				field.Invalid(field.NewPath("spec.containers[0].env[1].valueFrom.fileKeyRef.volumeName"), "", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should fail when FileKeyRef references non-existent volume in multiple containers",
+			podSpec: &core.PodSpec{
+				Containers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "non-existent-volume",
+										Path:       "database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "API_KEY",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "another-missing-volume",
+										Path:       "api.env",
+										Key:        "API_KEY",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.NotFound(field.NewPath("spec.containers[0].env[0].valueFrom.fileKeyRef.volumeName"), "volume \"non-existent-volume\" referenced by FileKeyRef does not exist"),
+				field.NotFound(field.NewPath("spec.containers[1].env[0].valueFrom.fileKeyRef.volumeName"), "volume \"another-missing-volume\" referenced by FileKeyRef does not exist"),
+			},
+		},
+		{
+			name: "should pass when FileKeyRef in initContainers references a valid emptyDir volume",
+			podSpec: &core.PodSpec{
+				InitContainers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "INIT_DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "init-config-volume",
+										Path:       "init-database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "init-config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should fail when FileKeyRef in initContainers references a hostPath volume",
+			podSpec: &core.PodSpec{
+				InitContainers: []core.Container{
+					{
+						Env: []core.EnvVar{
+							{
+								Name: "INIT_DATABASE_URL",
+								ValueFrom: &core.EnvVarSource{
+									FileKeyRef: &core.FileKeySelector{
+										VolumeName: "init-config-volume",
+										Path:       "init-database.env",
+										Key:        "DATABASE_URL",
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "init-config-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/init",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.initContainers[0].env[0].valueFrom.fileKeyRef.volumeName"), "init-config-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+		{
+			name: "should pass when FileKeyRef in ephemeralContainers references a valid emptyDir volume",
+			podSpec: &core.PodSpec{
+				EphemeralContainers: []core.EphemeralContainer{
+					{
+						EphemeralContainerCommon: core.EphemeralContainerCommon{
+							Env: []core.EnvVar{
+								{
+									Name: "EPHEMERAL_DATABASE_URL",
+									ValueFrom: &core.EnvVarSource{
+										FileKeyRef: &core.FileKeySelector{
+											VolumeName: "ephemeral-config-volume",
+											Path:       "ephemeral-database.env",
+											Key:        "DATABASE_URL",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "ephemeral-config-volume",
+						VolumeSource: core.VolumeSource{
+							EmptyDir: &core.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+			expectedErrs: nil,
+		},
+		{
+			name: "should fail when FileKeyRef in ephemeralContainers references a hostPath volume",
+			podSpec: &core.PodSpec{
+				EphemeralContainers: []core.EphemeralContainer{
+					{
+						EphemeralContainerCommon: core.EphemeralContainerCommon{
+							Env: []core.EnvVar{
+								{
+									Name: "EPHEMERAL_API_KEY",
+									ValueFrom: &core.EnvVarSource{
+										FileKeyRef: &core.FileKeySelector{
+											VolumeName: "init-config-volume",
+											Path:       "init-database.env",
+											Key:        "DATABASE_URL",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Volumes: []core.Volume{
+					{
+						Name: "init-config-volume",
+						VolumeSource: core.VolumeSource{
+							HostPath: &core.HostPathVolumeSource{
+								Path: "/tmp/init",
+								Type: newHostPathType(string(core.HostPathDirectory)),
+							},
+						},
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.ephemeralContainers[0].env[0].valueFrom.fileKeyRef.volumeName"), "init-config-volume", "referenced volume must be of type emptyDir"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateFileKeyRefVolumes(tc.podSpec, field.NewPath("spec"))
+			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin().ByDetailSubstring()
+			matcher.Test(t, tc.expectedErrs, errs)
+		})
+	}
+}
+
+func TestValidateContainerRestartPolicy(t *testing.T) {
+	volumeDevices := make(map[string]core.VolumeSource)
+	podOS := &core.PodOS{Name: core.OSName(v1.Linux)}
+	capabilities.ResetForTest()
+	capabilities.Initialize(capabilities.Capabilities{
+		AllowPrivileged: true,
+	})
+	podRestartPolicyAlways := core.RestartPolicyAlways
+
+	successCases := []struct {
+		Name               string
+		RestartPolicy      *core.ContainerRestartPolicy
+		RestartPolicyRules []core.ContainerRestartRule
+	}{
+		{
+			Name: "no-restart-policy-and-rules",
+		},
+		{
+			Name:          "restart-policy-always",
+			RestartPolicy: &containerRestartPolicyAlways,
+		}, {
+			Name:          "restart-policy-never",
+			RestartPolicy: &containerRestartPolicyNever,
+		}, {
+			Name:          "restart-policy-on-failure",
+			RestartPolicy: &containerRestartPolicyOnFailure,
+		}, {
+			Name:          "restart-policy-rules",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "Restart",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "In",
+					Values:   []int32{42},
+				},
+			}},
+		},
+	}
+
+	for _, tc := range successCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			containers := []core.Container{{
+				Name:                     "name",
+				Image:                    "image",
+				ImagePullPolicy:          "IfNotPresent",
+				TerminationMessagePolicy: "File",
+				RestartPolicy:            tc.RestartPolicy,
+				RestartPolicyRules:       tc.RestartPolicyRules,
+			}}
+			opts := PodValidationOptions{
+				AllowContainerRestartPolicyRules: true,
+			}
+			errs := validateContainers(containers, podOS, volumeDevices, nil, defaultGracePeriod, field.NewPath("containers"), opts, &podRestartPolicyAlways, noUserNamespace)
+			if len(errs) > 0 {
+				t.Errorf("Unexpected error(s): %v", errs)
+			}
+		})
+	}
+
+	errorCases := []struct {
+		Name               string
+		RestartPolicy      *core.ContainerRestartPolicy
+		RestartPolicyRules []core.ContainerRestartRule
+		ExpectedErrors     field.ErrorList
+	}{
+		{
+			Name:          "invalid container restart policy",
+			RestartPolicy: &containerRestartPolicyInvalid,
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicy",
+				BadValue: containerRestartPolicyInvalid,
+			}},
+		},
+		{
+			Name:          "empty container restart policy",
+			RestartPolicy: &containerRestartPolicyEmpty,
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicy",
+				BadValue: containerRestartPolicyEmpty,
+			}},
+		},
+		{
+			Name: "missing container restart policy when restart rules are specified",
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "Restart",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "In",
+					Values:   []int32{42},
+				},
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type: field.ErrorTypeRequired, Field: "containers[0].restartPolicy", BadValue: "",
+			}},
+		},
+		{
+			Name:          "invalid action",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "invalid",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "In",
+					Values:   []int32{42},
+				},
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicyRules[0].action",
+				BadValue: core.ContainerRestartRuleAction("invalid"),
+			}},
+		},
+		{
+			Name:          "empty action",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "In",
+					Values:   []int32{42},
+				},
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicyRules[0].action",
+				BadValue: core.ContainerRestartRuleAction(""),
+			}},
+		},
+		{
+			Name:          "empty ExitCodes",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "Restart",
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeRequired,
+				Field:    "containers[0].restartPolicyRules[0].exitCodes",
+				BadValue: "",
+			}},
+		},
+		{
+			Name:          "invalid ExitCodes Operator",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "Restart",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "invalid",
+					Values:   []int32{42},
+				},
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicyRules[0].exitCodes.operator",
+				BadValue: core.ContainerRestartRuleOnExitCodesOperator("invalid"),
+			}},
+		},
+		{
+			Name:          "empty ExitCodes Operator",
+			RestartPolicy: &containerRestartPolicyNever,
+			RestartPolicyRules: []core.ContainerRestartRule{{
+				Action: "Restart",
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "",
+					Values:   []int32{42},
+				},
+			}},
+			ExpectedErrors: field.ErrorList{{
+				Type:     field.ErrorTypeNotSupported,
+				Field:    "containers[0].restartPolicyRules[0].exitCodes.operator",
+				BadValue: core.ContainerRestartRuleOnExitCodesOperator(""),
+			}},
+		},
+	}
+
+	for _, tc := range errorCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			containers := []core.Container{{
+				Name:                     "name",
+				Image:                    "image",
+				ImagePullPolicy:          "IfNotPresent",
+				TerminationMessagePolicy: "File",
+				RestartPolicy:            tc.RestartPolicy,
+				RestartPolicyRules:       tc.RestartPolicyRules,
+			}}
+			opts := PodValidationOptions{
+				AllowContainerRestartPolicyRules: true,
+			}
+			errs := validateContainers(containers, podOS, volumeDevices, nil, defaultGracePeriod, field.NewPath("containers"), opts, &podRestartPolicyAlways, noUserNamespace)
+			if len(errs) == 0 {
+				t.Fatal("expected error but received none")
+			}
+
+			if diff := cmp.Diff(tc.ExpectedErrors, errs, cmpopts.IgnoreFields(field.Error{}, "Detail")); diff != "" {
+				t.Errorf("unexpected diff in errors (-want, +got):\n%s", diff)
+				t.Errorf("INFO: all errors:\n%s", prettyErrorList(errs))
+			}
+		})
+	}
+
+	// test cases sidecar containers
+	cases := []struct {
+		title              string
+		restartPolicyRules []core.ContainerRestartRule
+		expectedErrors     field.ErrorList
+	}{
+		{
+			"sidecar containers without restart policy rules",
+			nil,
+			nil,
+		},
+		{
+			"restart policy rules are not supported with restart policy Always",
+			[]core.ContainerRestartRule{{
+				Action: core.ContainerRestartRuleActionRestart,
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: core.ContainerRestartRuleOnExitCodesOpIn,
+					Values:   []int32{1},
+				},
+			}},
+			field.ErrorList{{Type: field.ErrorTypeForbidden, Field: "initContainers[0].restartPolicyRules", BadValue: ""}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.title, func(t *testing.T) {
+			containers := []core.Container{{
+				Name:                     "name",
+				Image:                    "image",
+				ImagePullPolicy:          "IfNotPresent",
+				TerminationMessagePolicy: "File",
+				RestartPolicy:            &containerRestartPolicyAlways,
+				RestartPolicyRules:       tc.restartPolicyRules,
+			}}
+			opts := PodValidationOptions{
+				AllowContainerRestartPolicyRules: true,
+			}
+			errs := validateInitContainers(containers, podOS, nil, volumeDevices, nil, defaultGracePeriod, field.NewPath("initContainers"), opts, &podRestartPolicyAlways, noUserNamespace)
+			if tc.expectedErrors == nil {
+				if len(errs) > 0 {
+					t.Errorf("unexpected errors: %v", prettyErrorList(errs))
+				}
+			} else if len(errs) == 0 {
+				t.Fatal("expected error but received none")
+			}
+
+			if diff := cmp.Diff(tc.expectedErrors, errs, cmpopts.IgnoreFields(field.Error{}, "Detail")); diff != "" {
+				t.Errorf("unexpected diff in errors (-want, +got):\n%s", diff)
+				t.Errorf("INFO: all errors:\n%s", prettyErrorList(errs))
+			}
+		})
+	}
+}
+
+func TestValidateContainerStateTransition(t *testing.T) {
+	var (
+		containerRestartPolicyAlways = core.ContainerRestartPolicyAlways
+		containerRestartPolicyNever  = core.ContainerRestartPolicyNever
+	)
+	runningState := core.ContainerState{Running: &core.ContainerStateRunning{}}
+	terminatedState := func(exitCode int32) core.ContainerState {
+		return core.ContainerState{Terminated: &core.ContainerStateTerminated{ExitCode: exitCode}}
+	}
+
+	container1 := core.Container{Name: "c1", Image: "image"}
+	container1RestartNever := core.Container{Name: "c1", Image: "image", RestartPolicy: &containerRestartPolicyNever}
+	container1RestartAlways := core.Container{Name: "c1", Image: "image", RestartPolicy: &containerRestartPolicyAlways}
+	container1RestartRuleIn42 := core.Container{
+		Name:          "c1",
+		Image:         "image",
+		RestartPolicy: &containerRestartPolicyNever,
+		RestartPolicyRules: []core.ContainerRestartRule{
+			{
+				Action: core.ContainerRestartRuleActionRestart,
+				ExitCodes: &core.ContainerRestartRuleOnExitCodes{
+					Operator: "In",
+					Values:   []int32{42},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		podSpec     core.PodSpec
+		oldStatuses []core.ContainerStatus
+		newStatuses []core.ContainerStatus
+		expectErr   bool
+	}{
+		{
+			name:        "feature enabled, not terminated",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyNever, Containers: []core.Container{container1RestartNever}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   false,
+		},
+		{
+			name:        "feature enabled, restart allowed by pod policy 'Always'",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyAlways, Containers: []core.Container{container1}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(0)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   false,
+		},
+		{
+			name:        "feature enabled, restart allowed by pod policy 'OnFailure' with exit 1",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyOnFailure, Containers: []core.Container{container1}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(1)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   false,
+		},
+		{
+			name:        "feature enabled, restart not allowed by pod policy 'OnFailure' with exit 0",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyOnFailure, Containers: []core.Container{container1}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(0)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   true,
+		},
+		{
+			name:        "feature enabled, restart not allowed by pod policy 'Never', with transition",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyNever, Containers: []core.Container{container1}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(0)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   true,
+		},
+		{
+			name:        "feature enabled, restart allowed by container policy 'Always'",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyNever, Containers: []core.Container{container1RestartAlways}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(0)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   false,
+		},
+		{
+			name:        "feature enabled, restart not allowed by container policy 'Never'",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyAlways, Containers: []core.Container{container1RestartNever}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(0)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   true,
+		},
+		{
+			name:        "feature enabled, restart allowed by container rule",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyNever, Containers: []core.Container{container1RestartRuleIn42}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(42)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   false,
+		},
+		{
+			name:        "feature enabled, restart not allowed by container rule mismatch",
+			podSpec:     core.PodSpec{RestartPolicy: core.RestartPolicyNever, Containers: []core.Container{container1RestartRuleIn42}},
+			oldStatuses: []core.ContainerStatus{{Name: "c1", State: terminatedState(1)}},
+			newStatuses: []core.ContainerStatus{{Name: "c1", State: runningState}},
+			expectErr:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ContainerRestartRules, true)
+
+			errs := ValidateContainerStateTransition(tc.newStatuses, tc.oldStatuses, field.NewPath("field"), tc.podSpec)
+
+			if tc.expectErr && len(errs) == 0 {
+				t.Errorf("Unexpected success")
+			}
+			if !tc.expectErr && len(errs) > 0 {
+				t.Errorf("Unexpected error(s): %v", errs)
 			}
 		})
 	}

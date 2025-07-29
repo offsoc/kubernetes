@@ -215,9 +215,11 @@ func newProxyServer(ctx context.Context, config *kubeproxyconfig.KubeProxyConfig
 	}
 
 	rawNodeIPs := s.NodeManager.NodeIPs()
-	s.podCIDRs = s.NodeManager.PodCIDRs()
-	logger.Info("Successfully retrieved NodeIPs", "NodeIPs", rawNodeIPs)
+	if len(rawNodeIPs) > 0 {
+		logger.Info("Successfully retrieved NodeIPs", "NodeIPs", rawNodeIPs)
+	}
 	s.PrimaryIPFamily, s.NodeIPs = detectNodeIPs(ctx, rawNodeIPs, config.BindAddress)
+	s.podCIDRs = s.NodeManager.PodCIDRs()
 
 	if len(config.NodePortAddresses) == 1 && config.NodePortAddresses[0] == kubeproxyconfig.NodePortAddressesPrimary {
 		var nodePortAddresses []string
