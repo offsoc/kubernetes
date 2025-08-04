@@ -1715,6 +1715,87 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 		})
 	}
 
+	consumableCapacityTests := func() {
+		nodes := drautils.NewNodes(f, 1, 1)
+		// single device which allows multiple allocations and has 80Gi consumable memory.
+		driver := drautils.NewDriver(f, nodes, drautils.ToDriverResources(
+			[]resourceapi.CounterSet{},
+			[]resourceapi.Device{
+				{
+					Name:                     "consumable-device-1",
+					AllowMultipleAllocations: ptr.To(true),
+					Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+						"memory": {
+							Value: resource.MustParse("8Gi"),
+							RequestPolicy: &resourceapi.CapacityRequestPolicy{
+								Default: ptr.To(resource.MustParse("1Gi")),
+								ValidRange: &resourceapi.CapacityRequestPolicyRange{
+									Min: ptr.To(resource.MustParse("1Gi")),
+								},
+							},
+						},
+					},
+				},
+			}...,
+		))
+		b := drautils.NewBuilder(f, driver)
+
+		f.It("must allow multiple allocations and consume capacity", f.WithLabel("KubeletMinVersion:1.34"), func(ctx context.Context) {
+			// The first pod will use 4Gi of the device.
+			claim := b.ExternalClaim()
+			claim.Spec.Devices.Requests[0].Exactly.Capacity = &resourceapi.CapacityRequirements{
+				Requests: map[resourceapi.QualifiedName]resource.Quantity{
+					"memory": resource.MustParse("4Gi"),
+				},
+			}
+			pod := b.PodExternal()
+			pod.Spec.ResourceClaims[0].ResourceClaimName = &claim.Name
+			b.Create(ctx, claim, pod)
+			b.TestPod(ctx, f, pod)
+
+			// The second pod will be failed to request 8Gi capacity.
+			claim2 := b.ExternalClaim()
+			claim2.Spec.Devices.Requests[0].Exactly.Capacity = &resourceapi.CapacityRequirements{
+				Requests: map[resourceapi.QualifiedName]resource.Quantity{
+					"memory": resource.MustParse("8Gi"),
+				},
+			}
+			pod2 := b.PodExternal()
+			pod2.Spec.ResourceClaims[0].ResourceClaimName = &claim2.Name
+			b.Create(ctx, claim2, pod2)
+
+			// The third pod should be able to use the rest 4Gi of the device.
+			claim3 := b.ExternalClaim()
+			claim3.Spec.Devices.Requests[0].Exactly.Capacity = &resourceapi.CapacityRequirements{
+				Requests: map[resourceapi.QualifiedName]resource.Quantity{
+					"memory": resource.MustParse("4Gi"),
+				},
+			}
+			pod3 := b.PodExternal()
+			pod3.Spec.ResourceClaims[0].ResourceClaimName = &claim3.Name
+			b.Create(ctx, claim3, pod3)
+			b.TestPod(ctx, f, pod3)
+
+			gomega.Consistently(ctx, func(ctx context.Context) error {
+				testPod2, err := f.ClientSet.CoreV1().Pods(pod2.Namespace).Get(ctx, pod2.Name, metav1.GetOptions{})
+				if err != nil {
+					return fmt.Errorf("expected the test pod %s to exist: %w", pod2.Name, err)
+				}
+				if testPod2.Status.Phase != v1.PodPending {
+					return fmt.Errorf("pod %s: unexpected status %s, expected status: %s", pod2.Name, testPod2.Status.Phase, v1.PodPending)
+				}
+				return nil
+			}, 20*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
+
+			// Delete the first and third pod
+			b.DeletePodAndWaitForNotFound(ctx, pod)
+			b.DeletePodAndWaitForNotFound(ctx, pod3)
+
+			// There should be available capacity for pod2 now.
+			b.TestPod(ctx, f, pod2)
+		})
+	}
+
 	// It is okay to use the same context multiple times (like "control plane"),
 	// as long as the test names the still remain unique overall.
 
@@ -1725,6 +1806,10 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 	framework.Context("kubelet", feature.DynamicResourceAllocation, "on multiple nodes", func() { multiNodeTests(true) })
 
 	framework.Context("kubelet", feature.DynamicResourceAllocation, f.WithFeatureGate(features.DRAPrioritizedList), prioritizedListTests)
+
+	framework.Context("kubelet", feature.DynamicResourceAllocation, f.WithFeatureGate(features.DRAConsumableCapacity), consumableCapacityTests)
+
+	framework.Context("kubelet", feature.DynamicResourceAllocation, f.WithFeatureGate(features.DRAConsumableCapacity), consumableCapacityTests)
 
 	framework.Context("kubelet", feature.DynamicResourceAllocation, "with v1beta1 API", v1beta1Tests)
 	framework.Context("kubelet", feature.DynamicResourceAllocation, "with v1beta2 API", v1beta2Tests)
@@ -1806,7 +1891,6 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 			createdTaint := b.Create(ctx, taint)
 			taint = createdTaint[0].(*resourcealphaapi.DeviceTaintRule)
 			gomega.Expect(*taint).Should(gomega.HaveField("Spec.Taint.TimeAdded.Time", gomega.BeTemporally("~", time.Now(), time.Minute /* allow for some clock drift and delays */)))
-
 			framework.ExpectNoError(e2epod.WaitForPodTerminatingInNamespaceTimeout(ctx, f.ClientSet, pod.Name, f.Namespace.Name, f.Timeouts.PodStart))
 			pod, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, pod.Name, metav1.GetOptions{})
 			framework.ExpectNoError(err, "get pod")
@@ -1817,6 +1901,177 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 				"Reason":  gomega.Equal("DeletionByDeviceTaintManager"),
 				"Message": gomega.Equal("Device Taint manager: deleting due to NoExecute taint"),
 			}))))
+		})
+	})
+
+	framework.Context(f.WithFeatureGate(features.DRAExtendedResource), func() {
+		nodes := drautils.NewNodes(f, 1, 1)
+		driver := drautils.NewDriver(f, nodes, drautils.NetworkResources(10, false))
+		b := drautils.NewBuilder(f, driver)
+		b.UseExtendedResourceName = true
+
+		ginkgo.It("must run a pod with extended resource with one container one resource", func(ctx context.Context) {
+			pod := b.Pod()
+			res := v1.ResourceList{}
+			res[v1.ResourceName(drautils.ExtendedResourceName(0))] = resource.MustParse("1")
+			pod.Spec.Containers[0].Resources.Requests = res
+			pod.Spec.Containers[0].Resources.Limits = res
+
+			b.Create(ctx, pod)
+			err := e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod)
+			framework.ExpectNoError(err, "start pod")
+			containerEnv := []string{
+				"container_0_request_0", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[0].Name, false, containerEnv...)
+		})
+
+		ginkgo.It("must run a pod with extended resource with one container three resources", func(ctx context.Context) {
+			pod := b.Pod()
+			res := v1.ResourceList{}
+			for i := range 3 {
+				res[v1.ResourceName(drautils.ExtendedResourceName(i))] = resource.MustParse("1")
+			}
+			pod.Spec.Containers[0].Resources.Requests = res
+			pod.Spec.Containers[0].Resources.Limits = res
+
+			b.Create(ctx, pod)
+			err := e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod)
+			framework.ExpectNoError(err, "start pod")
+			containerEnv := []string{
+				"container_0_request_0", "true",
+				"container_0_request_1", "true",
+				"container_0_request_2", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[0].Name, false, containerEnv...)
+		})
+		ginkgo.It("must run a pod with extended resource with three containers one resource each", func(ctx context.Context) {
+			pod := b.Pod()
+			pod.Spec.Containers = append(pod.Spec.Containers, *pod.Spec.Containers[0].DeepCopy())
+			pod.Spec.Containers = append(pod.Spec.Containers, *pod.Spec.Containers[0].DeepCopy())
+			pod.Spec.Containers[0].Name = "container0"
+			pod.Spec.Containers[1].Name = "container1"
+			pod.Spec.Containers[2].Name = "container2"
+
+			for i := range 3 {
+				res := v1.ResourceList{}
+				res[v1.ResourceName(drautils.ExtendedResourceName(i))] = resource.MustParse("1")
+				pod.Spec.Containers[i].Resources.Requests = res
+				pod.Spec.Containers[i].Resources.Limits = res
+			}
+
+			b.Create(ctx, pod)
+			err := e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod)
+			framework.ExpectNoError(err, "start pod")
+			for i := range 3 {
+				containerEnv := []string{
+					fmt.Sprintf("container_%d_request_0", i), "true",
+				}
+				drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[i].Name, false, containerEnv...)
+			}
+		})
+		ginkgo.It("must run a pod with extended resource with three containers multiple resources each", func(ctx context.Context) {
+			pod := b.Pod()
+			pod.Spec.Containers = append(pod.Spec.Containers, *pod.Spec.Containers[0].DeepCopy())
+			pod.Spec.Containers = append(pod.Spec.Containers, *pod.Spec.Containers[0].DeepCopy())
+			pod.Spec.Containers[0].Name = "container0"
+			pod.Spec.Containers[1].Name = "container1"
+			pod.Spec.Containers[2].Name = "container2"
+
+			res := v1.ResourceList{}
+			res[v1.ResourceName(drautils.ExtendedResourceName(0))] = resource.MustParse("1")
+			pod.Spec.Containers[0].Resources.Requests = res
+			pod.Spec.Containers[0].Resources.Limits = res
+			res = v1.ResourceList{}
+			res[v1.ResourceName(drautils.ExtendedResourceName(1))] = resource.MustParse("1")
+			res[v1.ResourceName(drautils.ExtendedResourceName(2))] = resource.MustParse("1")
+			pod.Spec.Containers[1].Resources.Requests = res
+			pod.Spec.Containers[1].Resources.Limits = res
+			res = v1.ResourceList{}
+			res[v1.ResourceName(drautils.ExtendedResourceName(3))] = resource.MustParse("1")
+			res[v1.ResourceName(drautils.ExtendedResourceName(4))] = resource.MustParse("1")
+			res[v1.ResourceName(drautils.ExtendedResourceName(5))] = resource.MustParse("1")
+			pod.Spec.Containers[2].Resources.Requests = res
+			pod.Spec.Containers[2].Resources.Limits = res
+
+			b.Create(ctx, pod)
+			err := e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod)
+			framework.ExpectNoError(err, "start pod")
+			containerEnv := []string{
+				"container_0_request_0", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[0].Name, false, containerEnv...)
+			containerEnv = []string{
+				"container_1_request_0", "true",
+				"container_1_request_1", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[1].Name, false, containerEnv...)
+			containerEnv = []string{
+				"container_2_request_0", "true",
+				"container_2_request_1", "true",
+				"container_2_request_2", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, pod, pod.Spec.Containers[2].Name, false, containerEnv...)
+		})
+	})
+
+	framework.Context(f.WithFeatureGate(features.DRAExtendedResource), func() {
+		nodes := drautils.NewNodes(f, 2, 2)
+		nodes.NumReservedNodes = 1
+		driver := drautils.NewDriver(f, nodes, drautils.NetworkResources(2, false))
+		b := drautils.NewBuilder(f, driver)
+		b.UseExtendedResourceName = true
+
+		// This test needs the entire test cluster for itself, one node in the cluster
+		// is deployed device plugin for the test, therefore it is marked as serial.
+		// The test runs two pods, one pod request extended resource backed by DRA,
+		// the other pod requests extended resource by device plugin.
+		f.It("must run pods with extended resource on dra nodes and device plugin nodes", f.WithSerial(), func(ctx context.Context) {
+			extendedResourceName := deployDevicePlugin(ctx, f, nodes.ExtraNodeNames)
+			// drautils.ExtendedResourceName(-1) must be the same as the returned extendedResourceName
+			// drautils.ExtendedResourceName(-1) is used for DRA drivers
+			// extendedResourceName is used for device plugin.
+			gomega.Expect(string(extendedResourceName)).To(gomega.Equal(drautils.ExtendedResourceName(-1)))
+
+			pod1 := b.Pod()
+			res := v1.ResourceList{}
+			res[v1.ResourceName(drautils.ExtendedResourceName(-1))] = resource.MustParse("2")
+			pod1.Spec.Containers[0].Resources.Requests = res
+			pod1.Spec.Containers[0].Resources.Limits = res
+			b.Create(ctx, pod1)
+
+			pod2 := b.Pod()
+			pod2.Spec.Containers[0].Resources.Requests = res
+			pod2.Spec.Containers[0].Resources.Limits = res
+			b.Create(ctx, pod2)
+
+			err := e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod1)
+			framework.ExpectNoError(err, "start pod1")
+			err = e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod2)
+			framework.ExpectNoError(err, "start pod2")
+
+			scheduledPod1, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, pod1.Name, metav1.GetOptions{})
+			gomega.Expect(scheduledPod1).ToNot(gomega.BeNil())
+			framework.ExpectNoError(err)
+
+			scheduledPod2, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, pod2.Name, metav1.GetOptions{})
+			gomega.Expect(scheduledPod2).ToNot(gomega.BeNil())
+			framework.ExpectNoError(err)
+
+			draPod := scheduledPod1
+			devicePluginPod := scheduledPod2
+			if scheduledPod1.Spec.NodeName == nodes.ExtraNodeNames[0] {
+				draPod = scheduledPod2
+				devicePluginPod = scheduledPod1
+			}
+
+			gomega.Expect(devicePluginPod.Spec.NodeName).To(gomega.Equal(nodes.ExtraNodeNames[0]))
+			gomega.Expect(devicePluginPod.Status.ExtendedResourceClaimStatus).To(gomega.BeNil())
+			gomega.Expect(draPod.Spec.NodeName).To(gomega.Equal(nodes.NodeNames[0]))
+			containerEnv := []string{
+				"container_0_request_0", "true",
+			}
+			drautils.TestContainerEnv(ctx, f, draPod, draPod.Spec.Containers[0].Name, false, containerEnv...)
 		})
 	})
 
@@ -2044,12 +2299,18 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 			framework.ExpectNoError(err)
 			gomega.Expect(scheduledPod).ToNot(gomega.BeNil())
 
+			var shareIDStr *string
+			if shareID := allocatedResourceClaim.Status.Allocation.Devices.Results[0].ShareID; shareID != nil {
+				shareIDStr = ptr.To(string(*shareID))
+			}
+
 			ginkgo.By("Setting the device status a first time")
 			allocatedResourceClaim.Status.Devices = append(allocatedResourceClaim.Status.Devices,
 				resourceapi.AllocatedDeviceStatus{
 					Driver:     allocatedResourceClaim.Status.Allocation.Devices.Results[0].Driver,
 					Pool:       allocatedResourceClaim.Status.Allocation.Devices.Results[0].Pool,
 					Device:     allocatedResourceClaim.Status.Allocation.Devices.Results[0].Device,
+					ShareID:    shareIDStr,
 					Conditions: []metav1.Condition{{Type: "a", Status: "True", Message: "c", Reason: "d", LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))}},
 					Data:       &runtime.RawExtension{Raw: []byte(`{"foo":"bar"}`)},
 					NetworkData: &resourceapi.NetworkDeviceData{
@@ -2074,6 +2335,7 @@ var _ = framework.SIGDescribe("node")(framework.WithLabel("DRA"), func() {
 				Driver:     allocatedResourceClaim.Status.Allocation.Devices.Results[0].Driver,
 				Pool:       allocatedResourceClaim.Status.Allocation.Devices.Results[0].Pool,
 				Device:     allocatedResourceClaim.Status.Allocation.Devices.Results[0].Device,
+				ShareID:    shareIDStr,
 				Conditions: []metav1.Condition{{Type: "e", Status: "True", Message: "g", Reason: "h", LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))}},
 				Data:       &runtime.RawExtension{Raw: []byte(`{"bar":"foo"}`)},
 				NetworkData: &resourceapi.NetworkDeviceData{

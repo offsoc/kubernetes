@@ -720,6 +720,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationscorev1.ConfigMapVolumeSourceApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("Container"):
 		return &applyconfigurationscorev1.ContainerApplyConfiguration{}
+	case corev1.SchemeGroupVersion.WithKind("ContainerExtendedResourceRequest"):
+		return &applyconfigurationscorev1.ContainerExtendedResourceRequestApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("ContainerImage"):
 		return &applyconfigurationscorev1.ContainerImageApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("ContainerPort"):
@@ -930,6 +932,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationscorev1.PodDNSConfigApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("PodDNSConfigOption"):
 		return &applyconfigurationscorev1.PodDNSConfigOptionApplyConfiguration{}
+	case corev1.SchemeGroupVersion.WithKind("PodExtendedResourceClaimStatus"):
+		return &applyconfigurationscorev1.PodExtendedResourceClaimStatusApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("PodIP"):
 		return &applyconfigurationscorev1.PodIPApplyConfiguration{}
 	case corev1.SchemeGroupVersion.WithKind("PodOS"):
@@ -1628,6 +1632,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationsresourcev1.AllocatedDeviceStatusApplyConfiguration{}
 	case resourcev1.SchemeGroupVersion.WithKind("AllocationResult"):
 		return &applyconfigurationsresourcev1.AllocationResultApplyConfiguration{}
+	case resourcev1.SchemeGroupVersion.WithKind("CapacityRequestPolicy"):
+		return &applyconfigurationsresourcev1.CapacityRequestPolicyApplyConfiguration{}
+	case resourcev1.SchemeGroupVersion.WithKind("CapacityRequestPolicyRange"):
+		return &applyconfigurationsresourcev1.CapacityRequestPolicyRangeApplyConfiguration{}
+	case resourcev1.SchemeGroupVersion.WithKind("CapacityRequirements"):
+		return &applyconfigurationsresourcev1.CapacityRequirementsApplyConfiguration{}
 	case resourcev1.SchemeGroupVersion.WithKind("CELDeviceSelector"):
 		return &applyconfigurationsresourcev1.CELDeviceSelectorApplyConfiguration{}
 	case resourcev1.SchemeGroupVersion.WithKind("Counter"):
@@ -1718,6 +1728,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationsresourcev1beta1.AllocationResultApplyConfiguration{}
 	case resourcev1beta1.SchemeGroupVersion.WithKind("BasicDevice"):
 		return &applyconfigurationsresourcev1beta1.BasicDeviceApplyConfiguration{}
+	case resourcev1beta1.SchemeGroupVersion.WithKind("CapacityRequestPolicy"):
+		return &applyconfigurationsresourcev1beta1.CapacityRequestPolicyApplyConfiguration{}
+	case resourcev1beta1.SchemeGroupVersion.WithKind("CapacityRequestPolicyRange"):
+		return &applyconfigurationsresourcev1beta1.CapacityRequestPolicyRangeApplyConfiguration{}
+	case resourcev1beta1.SchemeGroupVersion.WithKind("CapacityRequirements"):
+		return &applyconfigurationsresourcev1beta1.CapacityRequirementsApplyConfiguration{}
 	case resourcev1beta1.SchemeGroupVersion.WithKind("CELDeviceSelector"):
 		return &applyconfigurationsresourcev1beta1.CELDeviceSelectorApplyConfiguration{}
 	case resourcev1beta1.SchemeGroupVersion.WithKind("Counter"):
@@ -1790,6 +1806,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationsresourcev1beta2.AllocatedDeviceStatusApplyConfiguration{}
 	case resourcev1beta2.SchemeGroupVersion.WithKind("AllocationResult"):
 		return &applyconfigurationsresourcev1beta2.AllocationResultApplyConfiguration{}
+	case resourcev1beta2.SchemeGroupVersion.WithKind("CapacityRequestPolicy"):
+		return &applyconfigurationsresourcev1beta2.CapacityRequestPolicyApplyConfiguration{}
+	case resourcev1beta2.SchemeGroupVersion.WithKind("CapacityRequestPolicyRange"):
+		return &applyconfigurationsresourcev1beta2.CapacityRequestPolicyRangeApplyConfiguration{}
+	case resourcev1beta2.SchemeGroupVersion.WithKind("CapacityRequirements"):
+		return &applyconfigurationsresourcev1beta2.CapacityRequirementsApplyConfiguration{}
 	case resourcev1beta2.SchemeGroupVersion.WithKind("CELDeviceSelector"):
 		return &applyconfigurationsresourcev1beta2.CELDeviceSelectorApplyConfiguration{}
 	case resourcev1beta2.SchemeGroupVersion.WithKind("Counter"):
